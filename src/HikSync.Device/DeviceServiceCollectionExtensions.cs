@@ -2,6 +2,7 @@ using HikSync.Core.Abstractions;
 using HikSync.Core.Configuration;
 using HikSync.Device.Fake;
 using HikSync.Device.Hikvision;
+using HikSync.Device.Isapi;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
@@ -10,8 +11,8 @@ namespace HikSync.Device;
 public static class DeviceServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers the access-device factory. Selects the HCNetSDK-backed factory or the in-memory
-    /// fake based on <see cref="SdkOptions.UseFakeDevice"/>.
+    /// Registers the access-device factory: fake, ISAPI (HTTP), or HCNetSDK — chosen by
+    /// <see cref="SdkOptions.UseFakeDevice"/> and <see cref="SdkOptions.Transport"/>.
     /// </summary>
     public static IServiceCollection AddHikSyncDevices(this IServiceCollection services)
     {
@@ -21,8 +22,10 @@ public static class DeviceServiceCollectionExtensions
         services.AddSingleton<IAccessDeviceFactory>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<SdkOptions>>().Value;
-            return options.UseFakeDevice
-                ? sp.GetRequiredService<FakeAccessDeviceFactory>()
+            if (options.UseFakeDevice)
+                return sp.GetRequiredService<FakeAccessDeviceFactory>();
+            return string.Equals(options.Transport, "isapi", StringComparison.OrdinalIgnoreCase)
+                ? ActivatorUtilities.CreateInstance<IsapiAccessDeviceFactory>(sp)
                 : ActivatorUtilities.CreateInstance<HikvisionDeviceFactory>(sp);
         });
 

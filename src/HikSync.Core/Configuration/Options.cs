@@ -35,6 +35,15 @@ public sealed class SdkOptions
 
     /// <summary>For ISAPI login: 0 = HTTP, 1 = HTTPS, 2 = adaptive.</summary>
     public byte Https { get; set; } = 0;
+
+    /// <summary>How to talk to the device: "sdk" (HCNetSDK) or "isapi" (HTTP/REST). Newer terminals often need "isapi".</summary>
+    public string Transport { get; set; } = "sdk";
+
+    /// <summary>ISAPI HTTP port (device web port, usually 80 — NOT the SDK port 8000).</summary>
+    public int IsapiPort { get; set; } = 80;
+
+    /// <summary>Use HTTPS for ISAPI.</summary>
+    public bool IsapiHttps { get; set; } = false;
 }
 
 /// <summary>Attendance-collection job options.</summary>

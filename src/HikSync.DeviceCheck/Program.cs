@@ -4,6 +4,7 @@ using HikSync.Core.Logic;
 using HikSync.Core.Models;
 using HikSync.Device.Fake;
 using HikSync.Device.Hikvision;
+using HikSync.Device.Isapi;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -34,6 +35,9 @@ if (flags.Contains("help") || (args.Length == 0))
           --minor <n>        ACS event minor type (default 0 = all)
           --login-mode <n>   0=Private 1=ISAPI 2=Adaptive (default 2, like iVMS-4200)
           --https <n>        ISAPI login: 0=HTTP 1=HTTPS 2=adaptive (default 0)
+          --transport <t>    sdk (HCNetSDK) or isapi (HTTP/REST). Try isapi if SDK gives errors.
+          --isapi-port <n>   ISAPI HTTP port (default 80, NOT the SDK port 8000)
+          --isapi-https      use HTTPS for ISAPI
           --sdk-path <dir>   HCNetSDK native folder (default native)
           --write-test       upsert a test user and read it back (WRITES to the device)
           --test-emp <no>    employee/card no for --write-test (default 999001)
@@ -63,15 +67,21 @@ if (!fake && string.IsNullOrWhiteSpace(ip))
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning));
 
+string transport = Get("transport", "sdk");
 var sdkOptions = Options.Create(new SdkOptions
 {
     NativeLibraryPath = Get("sdk-path", "native"),
     UseFakeDevice = fake,
     LoginMode = (byte)GetInt("login-mode", 2),
     Https = (byte)GetInt("https", 0),
+    Transport = transport,
+    IsapiPort = GetInt("isapi-port", 80),
+    IsapiHttps = flags.Contains("isapi-https"),
 });
-IAccessDeviceFactory factory = fake
-    ? new FakeAccessDeviceFactory()
+bool isapi = transport.Equals("isapi", StringComparison.OrdinalIgnoreCase);
+IAccessDeviceFactory factory =
+    fake ? new FakeAccessDeviceFactory()
+    : isapi ? new IsapiAccessDeviceFactory(sdkOptions, loggerFactory)
     : new HikvisionDeviceFactory(new HcNetSdkManager(sdkOptions, loggerFactory.CreateLogger<HcNetSdkManager>()), loggerFactory);
 
 var endpoint = new DeviceEndpoint { Ip = ip, Port = port, Username = Get("user", "admin"), Password = Get("pass", "") };
@@ -85,7 +95,10 @@ void Info(string m) => Console.WriteLine($"         {m}");
 
 string[] modeNames = { "Private", "ISAPI", "Adaptive" };
 string modeName = sdkOptions.Value.LoginMode < 3 ? modeNames[sdkOptions.Value.LoginMode] : sdkOptions.Value.LoginMode.ToString();
-Console.WriteLine($"HikSync.DeviceCheck -> {(fake ? "FAKE device" : endpoint.ToString())}  (user={endpoint.Username}, loginMode={modeName})");
+string target = fake ? "FAKE device"
+    : isapi ? $"{(sdkOptions.Value.IsapiHttps ? "https" : "http")}://{ip}:{sdkOptions.Value.IsapiPort} (ISAPI)"
+    : $"{endpoint} (SDK, loginMode={modeName})";
+Console.WriteLine($"HikSync.DeviceCheck -> {target}  (user={endpoint.Username})");
 
 IAccessDevice? device = null;
 try
