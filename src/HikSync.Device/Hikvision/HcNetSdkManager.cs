@@ -71,6 +71,8 @@ public sealed class HcNetSdkManager : IDisposable
             sPassword = endpoint.Password,
             byUseTransport = 0,
             bUseAsynLogin = 0,
+            byLoginMode = _options.LoginMode, // 0=Private 1=ISAPI 2=Adaptive (default)
+            byHttps = _options.Https,
             byRes = new byte[119],
         };
         var deviceInfo = new NET_DVR_DEVICEINFO_V40

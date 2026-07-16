@@ -30,6 +30,8 @@ if (flags.Contains("help") || (args.Length == 0))
           --minutes <n>      attendance window to read (default 120)
           --offset <min>     device local-time offset from UTC in minutes (default 0)
           --max <n>          max rows to print per section (default 10)
+          --login-mode <n>   0=Private 1=ISAPI 2=Adaptive (default 2, like iVMS-4200)
+          --https <n>        ISAPI login: 0=HTTP 1=HTTPS 2=adaptive (default 0)
           --sdk-path <dir>   HCNetSDK native folder (default native)
           --write-test       upsert a test user and read it back (WRITES to the device)
           --test-emp <no>    employee/card no for --write-test (default 999001)
@@ -59,7 +61,13 @@ if (!fake && string.IsNullOrWhiteSpace(ip))
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning));
 
-var sdkOptions = Options.Create(new SdkOptions { NativeLibraryPath = Get("sdk-path", "native"), UseFakeDevice = fake });
+var sdkOptions = Options.Create(new SdkOptions
+{
+    NativeLibraryPath = Get("sdk-path", "native"),
+    UseFakeDevice = fake,
+    LoginMode = (byte)GetInt("login-mode", 2),
+    Https = (byte)GetInt("https", 0),
+});
 IAccessDeviceFactory factory = fake
     ? new FakeAccessDeviceFactory()
     : new HikvisionDeviceFactory(new HcNetSdkManager(sdkOptions, loggerFactory.CreateLogger<HcNetSdkManager>()), loggerFactory);
@@ -73,7 +81,9 @@ void Ok(string m) => Console.WriteLine($"  [ OK ] {m}");
 void Fail(string m) { Console.WriteLine($"  [FAIL] {m}"); failures++; }
 void Info(string m) => Console.WriteLine($"         {m}");
 
-Console.WriteLine($"HikSync.DeviceCheck -> {(fake ? "FAKE device" : endpoint.ToString())}  (user={endpoint.Username})");
+string[] modeNames = { "Private", "ISAPI", "Adaptive" };
+string modeName = sdkOptions.Value.LoginMode < 3 ? modeNames[sdkOptions.Value.LoginMode] : sdkOptions.Value.LoginMode.ToString();
+Console.WriteLine($"HikSync.DeviceCheck -> {(fake ? "FAKE device" : endpoint.ToString())}  (user={endpoint.Username}, loginMode={modeName})");
 
 IAccessDevice? device = null;
 try

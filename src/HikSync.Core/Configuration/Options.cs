@@ -26,6 +26,15 @@ public sealed class SdkOptions
     public bool UseFakeDevice { get; set; } = false;
 
     public int LoginTimeoutSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// Login protocol: 0 = Private (port 8000), 1 = ISAPI, 2 = Adaptive (tries both, like iVMS-4200).
+    /// Default Adaptive — newer terminals reject the Private login and require ISAPI.
+    /// </summary>
+    public byte LoginMode { get; set; } = 2;
+
+    /// <summary>For ISAPI login: 0 = HTTP, 1 = HTTPS, 2 = adaptive.</summary>
+    public byte Https { get; set; } = 0;
 }
 
 /// <summary>Attendance-collection job options.</summary>
