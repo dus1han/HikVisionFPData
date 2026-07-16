@@ -66,10 +66,10 @@ public sealed class IsapiAccessDevice : IAccessDevice
                 ["searchResultPosition"] = position,
                 ["maxResults"] = pageSize,
                 ["major"] = (int)query.Major,
+                ["minor"] = (int)query.Minor, // required by firmware; 0 = all minors
                 ["startTime"] = start,
                 ["endTime"] = end,
             };
-            if (query.Minor > 0) cond["minor"] = (int)query.Minor;
 
             string reqJson = JsonSerializer.Serialize(new Dictionary<string, object> { ["AcsEventCond"] = cond });
             using var content = new StringContent(reqJson, Encoding.UTF8, "application/json");
