@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <OutputType>Exe</OutputType>
+    <!-- HCNetSDK native DLLs are x64: the host process must be x64. -->
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UserSecretsId>dotnet-HikSync.Service-d64d1cfa-0f39-49c7-9a17-931c147d9d89</UserSecretsId>
+    <!-- Windows service host; DPAPI and HCNetSDK are Windows-only by design. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="8.0.0" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.4" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HikSync.Core\HikSync.Core.csproj" />
+    <ProjectReference Include="..\HikSync.Application\HikSync.Application.csproj" />
+    <ProjectReference Include="..\HikSync.Data\HikSync.Data.csproj" />
+    <ProjectReference Include="..\HikSync.Device\HikSync.Device.csproj" />
+    <ProjectReference Include="..\HikSync.Push\HikSync.Push.csproj" />
+  </ItemGroup>
+
+  <!-- Drop the HCNetSDK x64 DLL set into native\ and it is copied next to the exe.
+       Remove any default item first, then re-add with copy metadata and a preserved link path. -->
+  <ItemGroup>
+    <None Remove="native\**\*" />
+    <None Include="native\**\*" CopyToOutputDirectory="PreserveNewest" Link="native\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

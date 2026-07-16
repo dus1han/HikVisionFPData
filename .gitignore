@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+.vs/
+
+# Publish output
+publish/
+artifacts/
+
+# HCNetSDK native binaries — licensed Hikvision SDK, not distributed via git.
+# Obtain from the SDK package and drop into src/HikSync.Service/native/ (see its README).
+src/HikSync.Service/native/*
+!src/HikSync.Service/native/README.md
+
+# OS / editor
+Thumbs.db
+.DS_Store
+*.swp

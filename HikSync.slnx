@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HikSync.Application/HikSync.Application.csproj" />
+    <Project Path="src/HikSync.Core/HikSync.Core.csproj" />
+    <Project Path="src/HikSync.Data/HikSync.Data.csproj" />
+    <Project Path="src/HikSync.Device/HikSync.Device.csproj" />
+    <Project Path="src/HikSync.DeviceCheck/HikSync.DeviceCheck.csproj" />
+    <Project Path="src/HikSync.Push/HikSync.Push.csproj" />
+    <Project Path="src/HikSync.Service/HikSync.Service.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HikSync.UnitTests/HikSync.UnitTests.csproj" />
+  </Folder>
+</Solution>
