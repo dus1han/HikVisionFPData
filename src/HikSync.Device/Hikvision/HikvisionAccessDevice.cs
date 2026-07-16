@@ -56,8 +56,8 @@ public sealed class HikvisionAccessDevice : IAccessDevice
         var cond = new NET_DVR_ACS_EVENT_COND();
         cond.Init();
         cond.dwSize = (uint)Marshal.SizeOf<NET_DVR_ACS_EVENT_COND>();
-        cond.dwMajor = 0;                 // 0 = all majors
-        cond.dwMinor = 0;                 // 0 = all minors
+        cond.dwMajor = query.Major;       // 5 = event (attendance); 0 is rejected by newer firmware
+        cond.dwMinor = query.Minor;       // 0 = all minors under the major
         cond.byPicEnable = 0;             // no picture payload
         cond.byTimeType = 0;
         cond.wInductiveEventType = 65535;

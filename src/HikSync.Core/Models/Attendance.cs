@@ -27,6 +27,12 @@ public sealed record AcsEventQuery
 
     /// <summary>Device local-time offset from UTC (device reports local time).</summary>
     public TimeSpan DeviceUtcOffset { get; init; } = TimeSpan.Zero;
+
+    /// <summary>ACS event major type. 5 = event (attendance verifications). 0 is invalid on newer firmware.</summary>
+    public uint Major { get; init; } = 5;
+
+    /// <summary>ACS event minor type. 0 = all minors under the major.</summary>
+    public uint Minor { get; init; } = 0;
 }
 
 /// <summary>An attendance row as stored in the LOCAL edge database.</summary>

@@ -30,6 +30,8 @@ if (flags.Contains("help") || (args.Length == 0))
           --minutes <n>      attendance window to read (default 120)
           --offset <min>     device local-time offset from UTC in minutes (default 0)
           --max <n>          max rows to print per section (default 10)
+          --major <n>        ACS event major type (default 5 = event/attendance)
+          --minor <n>        ACS event minor type (default 0 = all)
           --login-mode <n>   0=Private 1=ISAPI 2=Adaptive (default 2, like iVMS-4200)
           --https <n>        ISAPI login: 0=HTTP 1=HTTPS 2=adaptive (default 0)
           --sdk-path <dir>   HCNetSDK native folder (default native)
@@ -113,6 +115,8 @@ try
             StartUtc = DateTime.UtcNow.AddMinutes(-minutes),
             EndUtc = DateTime.UtcNow,
             DeviceUtcOffset = TimeSpan.FromMinutes(offsetMin),
+            Major = (uint)GetInt("major", 5),
+            Minor = (uint)GetInt("minor", 0),
         };
         int n = 0;
         await foreach (var e in device.ReadEventsAsync(query, ct))
