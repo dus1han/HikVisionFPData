@@ -19,3 +19,10 @@ Rules:
 - Keep the `HCNetSDKCom\` plugin folder intact — missing plugins cause login/config calls to fail
   with obscure error codes.
 - These binaries are **not** committed to source control; obtain them from your Hikvision SDK package.
+- The service adds this `native\` folder to the DLL search path at startup, so the DLLs may stay in
+  this subfolder (no need to place them next to the exe).
+
+**On the target machine** (required for HCNetSDK to load):
+- Install the **Microsoft Visual C++ 2015–2022 Redistributable (x64)** (`vc_redist.x64.exe`).
+  Without it you get: *"Unable to load DLL 'HCNetSDK.dll' or one of its dependencies: the specified
+  module could not be found."* even when all DLLs are present.

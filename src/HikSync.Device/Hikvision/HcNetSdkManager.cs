@@ -24,6 +24,9 @@ public sealed class HcNetSdkManager : IDisposable
         _logger = logger;
     }
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetDllDirectory(string? lpPathName);
+
     public void EnsureInitialized()
     {
         if (_initialized) return;
@@ -31,12 +34,26 @@ public sealed class HcNetSdkManager : IDisposable
         {
             if (_initialized) return;
 
+            // The native DLLs live in a subfolder, but P/Invoke's default search does NOT look there.
+            // Add it to the DLL search path BEFORE the first HCNetSDK call so HCNetSDK.dll and its
+            // sibling dependencies (HCCore.dll, OpenSSL, etc.) load.
+            string nativeFull = Path.GetFullPath(_options.NativeLibraryPath, AppContext.BaseDirectory);
+            if (Directory.Exists(nativeFull))
+            {
+                if (!SetDllDirectory(nativeFull))
+                    _logger.LogWarning("SetDllDirectory({Path}) failed (Win32 {Error}).", nativeFull, Marshal.GetLastWin32Error());
+            }
+            else
+            {
+                _logger.LogWarning("HCNetSDK native folder not found: {Path}", nativeFull);
+            }
+
             SetSdkPath(_options.NativeLibraryPath);
 
             if (!NET_DVR_Init())
                 throw new HcNetSdkException("NET_DVR_Init", NET_DVR_GetLastError());
 
-            _logger.LogInformation("HCNetSDK initialized (native path: {Path}).", _options.NativeLibraryPath);
+            _logger.LogInformation("HCNetSDK initialized (native path: {Path}).", nativeFull);
             _initialized = true;
         }
     }
