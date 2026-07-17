@@ -2,6 +2,8 @@ using HikSync.Core.Abstractions;
 using HikSync.Core.Configuration;
 using HikSync.Core.Logic;
 using HikSync.Core.Models;
+using System.Net;
+using System.Text;
 using HikSync.Device.Fake;
 using HikSync.Device.Hikvision;
 using HikSync.Device.Isapi;
@@ -42,6 +44,7 @@ if (flags.Contains("help") || (args.Length == 0))
           --write-test       upsert a test user and read it back (WRITES to the device)
           --test-emp <no>    employee/card no for --write-test (default 999001)
           --fake             use the in-memory fake device (self-test, no hardware)
+          --probe <emp>      dump raw ISAPI responses (capabilities + fingerprint) for an employee
 
         Example:
           HikSync.DeviceCheck --ip 192.168.1.10 --user admin --pass secret --minutes 240
@@ -63,6 +66,13 @@ if (!fake && string.IsNullOrWhiteSpace(ip))
 {
     Console.Error.WriteLine("--ip is required (or use --fake). Run with --help.");
     return 2;
+}
+
+// Diagnostic: --probe <employeeNo> dumps raw ISAPI responses (capabilities + biometric endpoints).
+if (opts.TryGetValue("probe", out var probeEmp))
+{
+    await RunProbe(ip, GetInt("isapi-port", 80), Get("user", "admin"), Get("pass", ""), probeEmp);
+    return 0;
 }
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning));
@@ -205,3 +215,33 @@ return failures == 0 ? 0 : 1;
 
 static string Describe(Exception ex) =>
     ex is HcNetSdkException sdk ? $"{sdk.Message} (SDK error {sdk.ErrorCode})" : ex.Message;
+
+static async Task RunProbe(string ip, int port, string user, string pass, string emp)
+{
+    using var handler = new HttpClientHandler { Credentials = new NetworkCredential(user, pass) };
+    using var http = new HttpClient(handler) { BaseAddress = new Uri($"http://{ip}:{port}/"), Timeout = TimeSpan.FromSeconds(15) };
+    Console.WriteLine($"PROBE {ip}:{port}  employee={emp}\n");
+
+    async Task Hit(string label, HttpMethod method, string path, string? body)
+    {
+        Console.WriteLine($"===== {label} =====");
+        Console.WriteLine($"{method} {path}");
+        try
+        {
+            using var req = new HttpRequestMessage(method, path);
+            if (body is not null) req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var resp = await http.SendAsync(req);
+            string txt = await resp.Content.ReadAsStringAsync();
+            Console.WriteLine($"HTTP {(int)resp.StatusCode}");
+            Console.WriteLine(txt.Length > 1800 ? txt[..1800] + "…(truncated)" : txt);
+        }
+        catch (Exception ex) { Console.WriteLine("ERROR: " + ex.Message); }
+        Console.WriteLine();
+    }
+
+    await Hit("AccessControl capabilities", HttpMethod.Get, "/ISAPI/AccessControl/capabilities?format=json", null);
+    await Hit("Fingerprint get (FingerPrintUpload)", HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintUpload?format=json",
+        $"{{\"FingerPrintCond\":{{\"searchID\":\"1\",\"employeeNo\":\"{emp}\",\"cardReaderNo\":1}}}}");
+    await Hit("UserInfo capabilities", HttpMethod.Get, "/ISAPI/AccessControl/UserInfo/capabilities?format=json", null);
+    await Hit("Face lib capabilities", HttpMethod.Get, "/ISAPI/Intelligent/FDLib/capabilities?format=json", null);
+}
