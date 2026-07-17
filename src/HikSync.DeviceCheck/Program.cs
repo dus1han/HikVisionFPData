@@ -45,6 +45,10 @@ if (flags.Contains("help") || (args.Length == 0))
           --test-emp <no>    employee/card no for --write-test (default 999001)
           --fake             use the in-memory fake device (self-test, no hardware)
           --probe <emp>      dump raw ISAPI responses (capabilities + fingerprint) for an employee
+          --delete-others <emp>   DELETE every user on the device except <emp>
+          --sync-to <ip>     copy users + fingerprints from --ip to this target device
+          --to-user <u>      target device username for --sync-to (default: same as --user)
+          --to-pass <p>      target device password for --sync-to (default: same as --pass)
 
         Example:
           HikSync.DeviceCheck --ip 192.168.1.10 --user admin --pass secret --minutes 240
@@ -109,6 +113,19 @@ string target = fake ? "FAKE device"
     : isapi ? $"{(sdkOptions.Value.IsapiHttps ? "https" : "http")}://{ip}:{sdkOptions.Value.IsapiPort} (ISAPI)"
     : $"{endpoint} (SDK, loginMode={modeName})";
 Console.WriteLine($"HikSync.DeviceCheck -> {target}  (user={endpoint.Username})");
+
+// Maintenance modes (run instead of the standard checks).
+if (opts.TryGetValue("delete-others", out var keepEmp))
+{
+    await DeleteOthers(factory, endpoint, keepEmp, ct);
+    return 0;
+}
+if (opts.TryGetValue("sync-to", out var syncTargetIp))
+{
+    var targetEp = new DeviceEndpoint { Ip = syncTargetIp, Port = port, Username = Get("to-user", endpoint.Username), Password = Get("to-pass", endpoint.Password) };
+    await SyncTo(factory, endpoint, targetEp, ct);
+    return 0;
+}
 
 IAccessDevice? device = null;
 try
@@ -215,6 +232,49 @@ return failures == 0 ? 0 : 1;
 
 static string Describe(Exception ex) =>
     ex is HcNetSdkException sdk ? $"{sdk.Message} (SDK error {sdk.ErrorCode})" : ex.Message;
+
+static async Task DeleteOthers(IAccessDeviceFactory factory, DeviceEndpoint ep, string keep, CancellationToken ct)
+{
+    await using var dev = await factory.ConnectAsync(ep, ct);
+    var users = new List<DeviceUser>();
+    await foreach (var u in dev.ReadUsersAsync(ct)) users.Add(u);
+    var toDelete = users.Where(u => u.EmployeeNo != keep).ToList();
+    Console.WriteLine($"Found {users.Count} user(s). Keeping '{keep}', deleting {toDelete.Count}...");
+    int ok = 0;
+    foreach (var u in toDelete)
+    {
+        try { await dev.DeleteUserAsync(u.EmployeeNo, ct); ok++; Console.WriteLine($"  deleted {u.EmployeeNo}"); }
+        catch (Exception ex) { Console.WriteLine($"  FAILED delete {u.EmployeeNo}: {ex.Message}"); }
+    }
+    Console.WriteLine($"\nDeleted {ok}/{toDelete.Count}. Users now on device:");
+    await foreach (var u in dev.ReadUsersAsync(ct)) Console.WriteLine($"  employee_no={u.EmployeeNo}  name='{u.Name}'");
+}
+
+static async Task SyncTo(IAccessDeviceFactory factory, DeviceEndpoint src, DeviceEndpoint dst, CancellationToken ct)
+{
+    Console.WriteLine($"Sync {src.Ip} -> {dst.Ip} (user={dst.Username})\n");
+    await using var s = await factory.ConnectAsync(src, ct);
+    await using var d = await factory.ConnectAsync(dst, ct);
+
+    var users = new List<DeviceUser>();
+    await foreach (var u in s.ReadUsersAsync(ct)) users.Add(u);
+    var fps = new List<FingerprintTemplate>();
+    await foreach (var f in s.ReadFingerprintsAsync(ct)) fps.Add(f);
+    Console.WriteLine($"Source: {users.Count} user(s), {fps.Count} fingerprint(s).\n");
+
+    int uOk = 0, uErr = 0, fOk = 0, fErr = 0;
+    foreach (var u in users)
+    {
+        try { await d.UpsertUserAsync(u, ct); uOk++; Console.WriteLine($"  user {u.EmployeeNo} -> OK"); }
+        catch (Exception ex) { uErr++; Console.WriteLine($"  user {u.EmployeeNo} -> FAIL: {ex.Message}"); }
+    }
+    foreach (var f in fps)
+    {
+        try { await d.UpsertFingerprintAsync(f, ct); fOk++; Console.WriteLine($"  fingerprint {f.EmployeeNo}#{f.FingerIndex} ({f.Template.Length}b) -> OK"); }
+        catch (Exception ex) { fErr++; Console.WriteLine($"  fingerprint {f.EmployeeNo}#{f.FingerIndex} -> FAIL: {ex.Message}"); }
+    }
+    Console.WriteLine($"\nSync done. Users {uOk} ok / {uErr} fail. Fingerprints {fOk} ok / {fErr} fail.");
+}
 
 static async Task RunProbe(string ip, int port, string user, string pass, string emp)
 {
