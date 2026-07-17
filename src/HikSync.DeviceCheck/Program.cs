@@ -45,6 +45,7 @@ if (flags.Contains("help") || (args.Length == 0))
           --test-emp <no>    employee/card no for --write-test (default 999001)
           --fake             use the in-memory fake device (self-test, no hardware)
           --probe <emp>      dump raw ISAPI responses (capabilities + fingerprint) for an employee
+          --delete <emp[,emp]>    DELETE the given user(s); use "all" to delete everyone
           --delete-others <emp>   DELETE every user on the device except <emp>
           --sync-to <ip>     copy users + fingerprints from --ip to this target device
           --to-user <u>      target device username for --sync-to (default: same as --user)
@@ -115,6 +116,11 @@ string target = fake ? "FAKE device"
 Console.WriteLine($"HikSync.DeviceCheck -> {target}  (user={endpoint.Username})");
 
 // Maintenance modes (run instead of the standard checks).
+if (opts.TryGetValue("delete", out var delSpec))
+{
+    await DeleteUsers(factory, endpoint, delSpec, ct);
+    return 0;
+}
 if (opts.TryGetValue("delete-others", out var keepEmp))
 {
     await DeleteOthers(factory, endpoint, keepEmp, ct);
@@ -232,6 +238,32 @@ return failures == 0 ? 0 : 1;
 
 static string Describe(Exception ex) =>
     ex is HcNetSdkException sdk ? $"{sdk.Message} (SDK error {sdk.ErrorCode})" : ex.Message;
+
+static async Task DeleteUsers(IAccessDeviceFactory factory, DeviceEndpoint ep, string spec, CancellationToken ct)
+{
+    await using var dev = await factory.ConnectAsync(ep, ct);
+    List<string> emps;
+    if (spec.Equals("all", StringComparison.OrdinalIgnoreCase))
+    {
+        emps = new List<string>();
+        await foreach (var u in dev.ReadUsersAsync(ct)) emps.Add(u.EmployeeNo);
+        Console.WriteLine($"Deleting ALL {emps.Count} user(s)...");
+    }
+    else
+    {
+        emps = spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        Console.WriteLine($"Deleting {emps.Count} user(s): {string.Join(", ", emps)}");
+    }
+
+    int ok = 0;
+    foreach (var e in emps)
+    {
+        try { await dev.DeleteUserAsync(e, ct); ok++; Console.WriteLine($"  deleted {e}"); }
+        catch (Exception ex) { Console.WriteLine($"  FAILED delete {e}: {ex.Message}"); }
+    }
+    Console.WriteLine($"\nDeleted {ok}/{emps.Count}. Users now on device:");
+    await foreach (var u in dev.ReadUsersAsync(ct)) Console.WriteLine($"  employee_no={u.EmployeeNo}  name='{u.Name}'");
+}
 
 static async Task DeleteOthers(IAccessDeviceFactory factory, DeviceEndpoint ep, string keep, CancellationToken ct)
 {
