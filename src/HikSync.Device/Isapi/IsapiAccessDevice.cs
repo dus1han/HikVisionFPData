@@ -256,7 +256,7 @@ public sealed class IsapiAccessDevice : IAccessDevice
     {
         var body = new
         {
-            FingerPrintDownload = new
+            FingerPrintCfg = new
             {
                 employeeNo = fingerprint.EmployeeNo,
                 enableCardReader = new[] { 1 },

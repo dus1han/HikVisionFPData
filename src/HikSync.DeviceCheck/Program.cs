@@ -256,11 +256,15 @@ static async Task SyncTo(IAccessDeviceFactory factory, DeviceEndpoint src, Devic
     await using var s = await factory.ConnectAsync(src, ct);
     await using var d = await factory.ConnectAsync(dst, ct);
 
-    var users = new List<DeviceUser>();
-    await foreach (var u in s.ReadUsersAsync(ct)) users.Add(u);
+    var allUsers = new List<DeviceUser>();
+    await foreach (var u in s.ReadUsersAsync(ct)) allUsers.Add(u);
     var fps = new List<FingerprintTemplate>();
     await foreach (var f in s.ReadFingerprintsAsync(ct)) fps.Add(f);
-    Console.WriteLine($"Source: {users.Count} user(s), {fps.Count} fingerprint(s).\n");
+
+    // Sync only users that have at least one fingerprint.
+    var withFp = new HashSet<string>(fps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
+    var users = allUsers.Where(u => withFp.Contains(u.EmployeeNo)).ToList();
+    Console.WriteLine($"Source: {allUsers.Count} user(s), {fps.Count} fingerprint(s). Syncing {users.Count} user(s) that have fingerprints.\n");
 
     int uOk = 0, uErr = 0, fOk = 0, fErr = 0;
     foreach (var u in users)
@@ -303,5 +307,6 @@ static async Task RunProbe(string ip, int port, string user, string pass, string
     await Hit("Fingerprint get (FingerPrintUpload)", HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintUpload?format=json",
         $"{{\"FingerPrintCond\":{{\"searchID\":\"1\",\"employeeNo\":\"{emp}\",\"cardReaderNo\":1}}}}");
     await Hit("UserInfo capabilities", HttpMethod.Get, "/ISAPI/AccessControl/UserInfo/capabilities?format=json", null);
+    await Hit("FingerPrint write capabilities", HttpMethod.Get, "/ISAPI/AccessControl/FingerPrintDownload/capabilities?format=json", null);
     await Hit("Face lib capabilities", HttpMethod.Get, "/ISAPI/Intelligent/FDLib/capabilities?format=json", null);
 }

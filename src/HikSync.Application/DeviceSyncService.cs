@@ -87,6 +87,13 @@ public sealed class DeviceSyncService
             var outUsers = await ReadAllAsync(outDevice.ReadUsersAsync(ct));
             var outFps = await ReadAllAsync(outDevice.ReadFingerprintsAsync(ct));
 
+            // Optionally sync only users that have a fingerprint enrolled.
+            if (_options.OnlyUsersWithFingerprints)
+            {
+                var withFp = new HashSet<string>(inFps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
+                inUsers = inUsers.Where(u => withFp.Contains(u.EmployeeNo)).ToList();
+            }
+
             var plan = SyncPlanner.Build(inUsers, inFps, outUsers, outFps, _options.DeleteRemovedUsers);
 
             // Users first (fingerprints reference the user), then fingerprints, then deletes.

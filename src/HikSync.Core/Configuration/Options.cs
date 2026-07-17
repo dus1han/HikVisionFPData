@@ -78,6 +78,9 @@ public sealed class SyncOptions
 
     /// <summary>Delete OUT users that no longer exist on IN. Default off (never auto-delete).</summary>
     public bool DeleteRemovedUsers { get; set; } = false;
+
+    /// <summary>Only sync users that have at least one fingerprint (skip users without biometrics).</summary>
+    public bool OnlyUsersWithFingerprints { get; set; } = true;
 }
 
 /// <summary>Operation-log retention. A nightly job deletes rows older than <see cref="RetentionDays"/>.</summary>
