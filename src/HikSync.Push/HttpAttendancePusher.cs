@@ -39,7 +39,7 @@ public sealed class HttpAttendancePusher : IAttendancePusher
         if (batch.Count == 0) return PushResult.None;
 
         var keys = batch.Select(r => r.IdempotencyKey).ToList();
-        var payload = new { records = batch.Select(ToDto).ToList() };
+        var payload = batch.Select(ToDto).ToList(); // bare JSON array (API accepts a batch)
 
         var client = _httpFactory.CreateClient(nameof(HttpAttendancePusher));
         client.Timeout = TimeSpan.FromSeconds(Math.Max(5, _options.TimeoutSeconds));
@@ -91,15 +91,14 @@ public sealed class HttpAttendancePusher : IAttendancePusher
         catch { return "<unreadable>"; }
     }
 
-    private static object ToDto(AttendanceRecord r) => new
+    // Matches POST /api/attendanceraw/insertB — a bare array of these records.
+    private object ToDto(AttendanceRecord r) => new
     {
-        idempotencyKey = r.IdempotencyKey,
-        deviceIp = r.DeviceIp,
-        direction = r.Role == DeviceRole.In ? "IN" : "OUT",
-        location = r.Location,
-        employeeNo = r.EmployeeNo,
-        eventTime = DateTime.SpecifyKind(r.EventTimeUtc, DateTimeKind.Utc),
-        verifyMode = r.VerifyMode,
-        cardNo = r.CardNo,
+        companyId = _options.CompanyId,
+        employeeId = int.TryParse(r.EmployeeNo, out var id) ? id : 0,
+        checkTime = DateTime.SpecifyKind(r.EventTimeUtc, DateTimeKind.Utc)
+            .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
+        checkType = r.Role == DeviceRole.In ? "IN" : "OUT",
+        source = $"{r.Location}({r.DeviceIp})",
     };
 }

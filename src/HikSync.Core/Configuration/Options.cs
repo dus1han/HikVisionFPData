@@ -104,8 +104,11 @@ public sealed class PushOptions
     public int BatchSize { get; set; } = 200;
     public int MaxAttempts { get; set; } = 8;
 
-    /// <summary>Remote API URL to POST attendance batches to (e.g. http://10.0.0.50:8080/api/attendance).</summary>
+    /// <summary>Full remote API URL to POST attendance batches to, e.g. http://10.0.0.50:8080/api/attendanceraw/insertB</summary>
     public string? Endpoint { get; set; }
+
+    /// <summary>Fixed companyId sent with every record (not present in device data).</summary>
+    public int CompanyId { get; set; } = 0;
 
     /// <summary>None | Bearer | ApiKey | Basic.</summary>
     public string AuthType { get; set; } = "None";
