@@ -126,10 +126,18 @@ public sealed class IsapiAccessDevice : IAccessDevice
             CardNo = string.IsNullOrEmpty(card) ? null : card,
             Major = major,
             Minor = minor,
-            VerifyMode = MapVerifyMode(vm),
+            VerifyMode = string.IsNullOrEmpty(vm) ? MapVerifyModeFromMinor(minor) : MapVerifyMode(vm),
             Raw = e.GetRawText(),
         };
     }
+
+    // AcsEvent has no verify-mode field on this firmware; the minor code carries it.
+    private static VerifyMode MapVerifyModeFromMinor(int minor) => minor switch
+    {
+        38 => VerifyMode.Fingerprint, // observed: fingerprint verification passed
+        1 => VerifyMode.Card,
+        _ => VerifyMode.Unknown,
+    };
 
     private static VerifyMode MapVerifyMode(string vm) => vm.ToLowerInvariant() switch
     {
@@ -231,7 +239,9 @@ public sealed class IsapiAccessDevice : IAccessDevice
         var body = new { FingerPrintCond = new { searchID = "hiksync", cardReaderNo = 1, employeeNo } };
         using var doc = await SendJsonAsync(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintUpload?format=json", body, ct);
         var result = new List<FingerprintTemplate>();
-        if (doc.RootElement.TryGetProperty("FingerPrintInfo", out var list) && list.ValueKind == JsonValueKind.Array)
+        // Response shape: { "FingerPrintInfo": { "status": "OK", "FingerPrintList": [ { fingerPrintID, fingerData, ... } ] } }
+        if (doc.RootElement.TryGetProperty("FingerPrintInfo", out var info) &&
+            info.TryGetProperty("FingerPrintList", out var list) && list.ValueKind == JsonValueKind.Array)
             foreach (var f in list.EnumerateArray())
             {
                 string data = Str(f, "fingerData");
