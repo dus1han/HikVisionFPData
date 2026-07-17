@@ -113,9 +113,11 @@ public sealed class PushOptions
     /// <summary>Fixed companyId sent with every record (not present in device data).</summary>
     public int CompanyId { get; set; } = 0;
 
-    /// <summary>Minutes to add to the stored UTC event time for `checkTime`. 0 = UTC; set to your
-    /// device's UTC offset (e.g. 240 for UTC+4) to send local time. Format is yyyy-MM-dd HH:mm:ss.</summary>
-    public int TimeOffsetMinutes { get; set; } = 0;
+    /// <summary>
+    /// Timezone for `checkTime` (stored UTC is converted to this). Windows or IANA id, e.g.
+    /// "Sri Lanka Standard Time" / "Asia/Colombo". Empty = keep UTC. Format is yyyy-MM-dd HH:mm:ss.
+    /// </summary>
+    public string TimeZone { get; set; } = "Sri Lanka Standard Time";
 
     /// <summary>None | Bearer | ApiKey | Basic.</summary>
     public string AuthType { get; set; } = "None";

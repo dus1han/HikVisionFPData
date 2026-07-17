@@ -24,12 +24,19 @@ public sealed class HttpAttendancePusher : IAttendancePusher
     private readonly IHttpClientFactory _httpFactory;
     private readonly PushOptions _options;
     private readonly ILogger<HttpAttendancePusher> _logger;
+    private readonly TimeZoneInfo? _timeZone;
 
     public HttpAttendancePusher(IHttpClientFactory httpFactory, IOptions<PushOptions> options, ILogger<HttpAttendancePusher> logger)
     {
         _httpFactory = httpFactory;
         _options = options.Value;
         _logger = logger;
+
+        if (!string.IsNullOrWhiteSpace(_options.TimeZone))
+        {
+            try { _timeZone = TimeZoneInfo.FindSystemTimeZoneById(_options.TimeZone); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Push:TimeZone '{Tz}' not found; checkTime will be UTC.", _options.TimeZone); }
+        }
     }
 
     public bool Enabled => _options.Enabled && !string.IsNullOrWhiteSpace(_options.Endpoint);
@@ -96,10 +103,14 @@ public sealed class HttpAttendancePusher : IAttendancePusher
     {
         companyId = _options.CompanyId,
         employeeId = int.TryParse(r.EmployeeNo, out var id) ? id : 0,
-        checkTime = DateTime.SpecifyKind(r.EventTimeUtc, DateTimeKind.Utc)
-            .AddMinutes(_options.TimeOffsetMinutes)
-            .ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+        checkTime = LocalTime(r.EventTimeUtc).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
         checkType = r.Role == DeviceRole.In ? "IN" : "OUT",
         source = $"{r.Location}({r.DeviceIp})",
     };
+
+    private DateTime LocalTime(DateTime utc)
+    {
+        var u = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        return _timeZone is null ? u : TimeZoneInfo.ConvertTimeFromUtc(u, _timeZone);
+    }
 }
