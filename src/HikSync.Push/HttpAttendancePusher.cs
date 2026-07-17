@@ -97,7 +97,8 @@ public sealed class HttpAttendancePusher : IAttendancePusher
         companyId = _options.CompanyId,
         employeeId = int.TryParse(r.EmployeeNo, out var id) ? id : 0,
         checkTime = DateTime.SpecifyKind(r.EventTimeUtc, DateTimeKind.Utc)
-            .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
+            .AddMinutes(_options.TimeOffsetMinutes)
+            .ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
         checkType = r.Role == DeviceRole.In ? "IN" : "OUT",
         source = $"{r.Location}({r.DeviceIp})",
     };
