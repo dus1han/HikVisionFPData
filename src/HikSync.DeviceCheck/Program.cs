@@ -67,7 +67,7 @@ if (!fake && string.IsNullOrWhiteSpace(ip))
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning));
 
-string transport = Get("transport", "sdk");
+string transport = Get("transport", "isapi"); // default ISAPI; use --transport sdk for HCNetSDK
 var sdkOptions = Options.Create(new SdkOptions
 {
     NativeLibraryPath = Get("sdk-path", "native"),
@@ -140,6 +140,8 @@ try
                 Info($"employee_no={e.EmployeeNo,-10} event_time={e.EventTimeUtc:yyyy-MM-dd HH:mm:ss}Z " +
                      $"verify_mode={e.VerifyMode,-11} card_no={e.CardNo ?? "-",-12} serial={e.SerialNo} major/minor={e.Major}/{e.Minor}");
                 Info($"    idempotency_key={key}");
+                if (n == 0 && !string.IsNullOrEmpty(e.Raw))
+                    Info($"    raw: {(e.Raw.Length > 500 ? e.Raw[..500] + "…" : e.Raw)}");
             }
             n++;
         }

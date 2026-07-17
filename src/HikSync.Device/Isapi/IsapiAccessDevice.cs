@@ -127,7 +127,7 @@ public sealed class IsapiAccessDevice : IAccessDevice
             Major = major,
             Minor = minor,
             VerifyMode = MapVerifyMode(vm),
-            Raw = $"verifyMode={vm};minor={minor}",
+            Raw = e.GetRawText(),
         };
     }
 
