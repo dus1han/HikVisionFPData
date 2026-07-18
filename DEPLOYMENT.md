@@ -9,6 +9,24 @@ saves to a local Postgres, pushes to your API, and syncs fingerprints IN→OUT.
 
 ---
 
+## Deliverables — what to deploy where
+
+Two independent artifacts. Both are **self-contained x64 Windows builds — no .NET install required**.
+
+| Artifact | Publish folder | Purpose | Needs |
+|---|---|---|---|
+| **HikSync.Service** | `C:\Users\Saboor.a\Desktop\HikSync\` | The 24/7 service: capture attendance → local Postgres → push to your API, plus the two-way fingerprint sync. Runs as a Windows service. | Postgres + network to the terminals + `appsettings.json` |
+| **HikSync.DeviceCheck** | `C:\Users\Saboor.a\Desktop\HikSync-DeviceCheck\` | Diagnostics & maintenance CLI: verify a terminal, list users/fingerprints/attendance, delete users, one-off union sync, raw ISAPI probe. | Network to the terminals only — **no database, no config file** |
+
+**Deploy the service** on a machine that stays on (the one with/near Postgres, reachable to the
+terminals). **Deploy the tool** anywhere convenient — a technician's laptop is fine; just copy the
+whole folder and run it from a command prompt.
+
+The service folder also contains `scripts\` (DB + install scripts), `DEPLOYMENT.md` and `README.md`
+so it's a complete, self-contained deployment package.
+
+---
+
 ## 0. Prerequisites
 
 - A **Windows x64** host to run the service, on the **same network** as the terminals.
@@ -146,17 +164,41 @@ SELECT count(*) FROM attendance_events WHERE upload_status = 'dead_letter';
 
 ## 7. (Optional) Re-publish from source
 
-If you pull the repo and want a fresh build:
+Clone the repo, then build both artifacts (requires the .NET SDK on the *build* machine only — the
+outputs are self-contained):
+
 ```powershell
+git clone git@github.com:dus1han/HikVisionFPData.git
+cd HikVisionFPData
+
+# service
 dotnet publish src\HikSync.Service -c Release -r win-x64 --self-contained true -o C:\HikSync
+# tool
 dotnet publish src\HikSync.DeviceCheck -c Release -r win-x64 --self-contained true -o C:\HikCheck
+
+# bundle the helper scripts + guides with the service (optional but handy)
+Copy-Item scripts C:\HikSync\scripts -Recurse -Force
+Copy-Item DEPLOYMENT.md,README.md C:\HikSync -Force
 ```
+Then copy `C:\HikSync` to the service host and `C:\HikCheck` wherever you need the tool.
+Run the tests with `dotnet test` (17 should pass).
 
 ---
 
-## 8. The verification tool (HikSync.DeviceCheck)
+## 8. Deploy & use the verification tool (HikSync.DeviceCheck)
 
-Handy for checking a device or doing maintenance (defaults to ISAPI):
+**Deploy:** copy the whole **`HikSync-DeviceCheck\`** folder to wherever you need it (technician
+laptop, the service host, a USB stick). No install, no database, no config — it takes everything from
+the command line. It must be able to reach the terminals on the network (HTTP port 80 by default).
+
+```powershell
+cd C:\Users\Saboor.a\Desktop\HikSync-DeviceCheck
+.\HikSync.DeviceCheck.exe --help
+```
+
+Exit code is **0** if all checks pass, **1** if any fail — so it can be scripted across many devices.
+
+**Commands** (defaults to ISAPI):
 ```powershell
 # read everything (device info, attendance, users, fingerprints):
 HikSync.DeviceCheck.exe --ip 192.168.1.220 --user admin --pass 123456bio
@@ -166,7 +208,7 @@ HikSync.DeviceCheck.exe --ip 192.168.1.220 --user admin --pass 123456bio --delet
 HikSync.DeviceCheck.exe --ip 192.168.1.220 --user admin --pass 123456bio --delete all
 HikSync.DeviceCheck.exe --ip 192.168.1.220 --user admin --pass 123456bio --delete-others 56
 
-# one-off sync source -> target (users with fingerprints only):
+# one-off TWO-WAY union sync between a couple (each device gets what it's missing):
 HikSync.DeviceCheck.exe --ip 192.168.1.220 --user admin --pass 123456bio --sync-to 192.168.1.219 --to-user admin --to-pass "Asd@1234"
 
 # raw ISAPI diagnostics for one employee:
