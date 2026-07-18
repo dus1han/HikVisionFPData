@@ -48,7 +48,9 @@ INSERT INTO device_pairs (location, in_ip, in_username, in_password, out_ip, out
 VALUES ('Main Gate', '192.168.1.220', 'admin', '123456bio', '192.168.1.219', 'admin', 'Asd@1234');
 ```
 - Add one row per physical door/pair.
-- `IN` is where people enroll; fingerprints sync IN→OUT.
+- **Sync is a two-way union**: whichever users/fingerprints are missing on one device are copied from
+  the other, so **both terminals in a couple end up holding the complete set**. It's additive only —
+  it never overwrites an existing record or deletes anything. You can enroll on *either* terminal.
 - Disable a pair without deleting: `UPDATE device_pairs SET enabled=false WHERE id=…;`
 
 ---
@@ -72,9 +74,10 @@ Edit `C:\Users\Saboor.a\Desktop\HikSync\appsettings.json`:
 },
 "Sync": {
   "Enabled": true,
-  "IntervalSeconds": 300,           // fingerprint sync IN->OUT every 5 min
-  "OnlyUsersWithFingerprints": true,
-  "DeleteRemovedUsers": false
+  "IntervalSeconds": 300,            // run the sync every 5 min
+  "Bidirectional": true,             // union: each device gets what the OTHER has and it lacks
+  "OnlyUsersWithFingerprints": true, // ignore users with no fingerprint enrolled
+  "DeleteRemovedUsers": false        // one-way mode only; ignored when Bidirectional
 },
 "Push": {
   "Enabled": true,

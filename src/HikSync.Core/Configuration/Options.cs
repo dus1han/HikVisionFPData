@@ -76,7 +76,14 @@ public sealed class SyncOptions
     public bool Enabled { get; set; } = true;
     public int IntervalSeconds { get; set; } = 300;
 
-    /// <summary>Delete OUT users that no longer exist on IN. Default off (never auto-delete).</summary>
+    /// <summary>
+    /// Two-way union sync: each device in the couple receives whatever users/fingerprints it is
+    /// missing from the other, so both hold the complete set. Additive only (never overwrites or
+    /// deletes). Set false for the legacy one-way IN -> OUT master/slave behaviour.
+    /// </summary>
+    public bool Bidirectional { get; set; } = true;
+
+    /// <summary>Delete OUT users that no longer exist on IN. One-way mode only; ignored when Bidirectional.</summary>
     public bool DeleteRemovedUsers { get; set; } = false;
 
     /// <summary>Only sync users that have at least one fingerprint (skip users without biometrics).</summary>

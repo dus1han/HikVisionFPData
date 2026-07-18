@@ -51,6 +51,40 @@ public class SyncPlannerTests
     }
 
     [Fact]
+    public void BuildMissingOnly_AddsOnlyMissing_AndIgnoresChangedRecords()
+    {
+        var srcUsers = new[] { User("1001", "New Name"), User("1002") };
+        var srcFps = new[] { Fp("1001", 1, 1, 2, 3), Fp("1002", 1, 4, 5, 6) };
+        var tgtUsers = new[] { User("1001", "Old Name") };   // present but DIFFERENT
+        var tgtFps = new[] { Fp("1001", 1, 9, 9, 9) };       // present but DIFFERENT
+
+        var plan = SyncPlanner.BuildMissingOnly(srcUsers, srcFps, tgtUsers, tgtFps);
+
+        // 1001 exists on the target, so it must NOT be re-sent (prevents two devices ping-ponging).
+        plan.UsersToUpsert.Select(u => u.EmployeeNo).Should().BeEquivalentTo(new[] { "1002" });
+        plan.FingerprintsToUpsert.Should().ContainSingle(f => f.EmployeeNo == "1002");
+        plan.EmployeesToDelete.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void BuildMissingOnly_BothDirections_GivesEachDeviceTheOthersData()
+    {
+        var aUsers = new[] { User("1") };
+        var aFps = new[] { Fp("1", 1, 1) };
+        var bUsers = new[] { User("2") };
+        var bFps = new[] { Fp("2", 1, 2) };
+
+        var toB = SyncPlanner.BuildMissingOnly(aUsers, aFps, bUsers, bFps);
+        var toA = SyncPlanner.BuildMissingOnly(bUsers, bFps, aUsers, aFps);
+
+        toB.UsersToUpsert.Should().ContainSingle(u => u.EmployeeNo == "1");
+        toB.FingerprintsToUpsert.Should().ContainSingle(f => f.EmployeeNo == "1");
+        toA.UsersToUpsert.Should().ContainSingle(u => u.EmployeeNo == "2");
+        toA.FingerprintsToUpsert.Should().ContainSingle(f => f.EmployeeNo == "2");
+        // Applying both leaves each device holding {1, 2} — the union.
+    }
+
+    [Fact]
     public void DeletesRemovedUsers_OnlyWhenEnabled()
     {
         var inUsers = new[] { User("1001") };

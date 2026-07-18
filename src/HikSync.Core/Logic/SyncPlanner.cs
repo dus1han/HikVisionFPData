@@ -19,6 +19,33 @@ public sealed class SyncPlan
 /// </summary>
 public static class SyncPlanner
 {
+    /// <summary>
+    /// Additive plan: only what exists on the source but is MISSING on the target.
+    /// Used for the bidirectional (union) sync so a couple ends up holding the same full set.
+    /// Deliberately does NOT flag changed records — otherwise two devices would overwrite each
+    /// other's differing copies on every cycle.
+    /// </summary>
+    public static SyncPlan BuildMissingOnly(
+        IReadOnlyCollection<DeviceUser> sourceUsers,
+        IReadOnlyCollection<FingerprintTemplate> sourceFingerprints,
+        IReadOnlyCollection<DeviceUser> targetUsers,
+        IReadOnlyCollection<FingerprintTemplate> targetFingerprints)
+    {
+        var plan = new SyncPlan();
+
+        var targetEmployees = new HashSet<string>(targetUsers.Select(u => u.EmployeeNo), StringComparer.Ordinal);
+        foreach (var user in sourceUsers)
+            if (!targetEmployees.Contains(user.EmployeeNo))
+                plan.UsersToUpsert.Add(user);
+
+        var targetPrints = new HashSet<(string, int)>(targetFingerprints.Select(f => f.Key));
+        foreach (var fp in sourceFingerprints)
+            if (!targetPrints.Contains(fp.Key))
+                plan.FingerprintsToUpsert.Add(fp);
+
+        return plan;
+    }
+
     public static SyncPlan Build(
         IReadOnlyCollection<DeviceUser> inUsers,
         IReadOnlyCollection<FingerprintTemplate> inFingerprints,

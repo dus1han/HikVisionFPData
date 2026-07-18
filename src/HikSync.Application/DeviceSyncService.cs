@@ -87,22 +87,37 @@ public sealed class DeviceSyncService
             var outUsers = await ReadAllAsync(outDevice.ReadUsersAsync(ct));
             var outFps = await ReadAllAsync(outDevice.ReadFingerprintsAsync(ct));
 
-            // Optionally sync only users that have a fingerprint enrolled.
+            // Optionally restrict to users that actually have a fingerprint enrolled (both sides).
             if (_options.OnlyUsersWithFingerprints)
             {
-                var withFp = new HashSet<string>(inFps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
-                inUsers = inUsers.Where(u => withFp.Contains(u.EmployeeNo)).ToList();
+                var inWithFp = new HashSet<string>(inFps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
+                inUsers = inUsers.Where(u => inWithFp.Contains(u.EmployeeNo)).ToList();
+                var outWithFp = new HashSet<string>(outFps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
+                outUsers = outUsers.Where(u => outWithFp.Contains(u.EmployeeNo)).ToList();
             }
 
-            var plan = SyncPlanner.Build(inUsers, inFps, outUsers, outFps, _options.DeleteRemovedUsers);
+            string summary;
+            if (_options.Bidirectional)
+            {
+                // Union: give each device whatever the other has that it's missing.
+                var toOut = SyncPlanner.BuildMissingOnly(inUsers, inFps, outUsers, outFps);
+                var toIn = SyncPlanner.BuildMissingOnly(outUsers, outFps, inUsers, inFps);
 
-            // Users first (fingerprints reference the user), then fingerprints, then deletes.
-            foreach (var user in plan.UsersToUpsert)
-                await outDevice.UpsertUserAsync(user, ct);
-            foreach (var fp in plan.FingerprintsToUpsert)
-                await outDevice.UpsertFingerprintAsync(fp, ct);
-            foreach (var employeeNo in plan.EmployeesToDelete)
-                await outDevice.DeleteUserAsync(employeeNo, ct);
+                await ApplyAsync(outDevice, toOut, ct);
+                await ApplyAsync(inDevice, toIn, ct);
+
+                summary = $"union: -> OUT users +{toOut.UsersToUpsert.Count}, fp +{toOut.FingerprintsToUpsert.Count}; " +
+                          $"-> IN users +{toIn.UsersToUpsert.Count}, fp +{toIn.FingerprintsToUpsert.Count} " +
+                          $"(IN {inUsers.Count} users/{inFps.Count} fp, OUT {outUsers.Count} users/{outFps.Count} fp)";
+            }
+            else
+            {
+                // Legacy one-way: IN is master, OUT mirrors it.
+                var plan = SyncPlanner.Build(inUsers, inFps, outUsers, outFps, _options.DeleteRemovedUsers);
+                await ApplyAsync(outDevice, plan, ct);
+                summary = $"one-way IN->OUT: users +{plan.UsersToUpsert.Count}, fingerprints +{plan.FingerprintsToUpsert.Count}, " +
+                          $"deletes {plan.EmployeesToDelete.Count} (IN {inUsers.Count} users / OUT {outUsers.Count} users)";
+            }
 
             await _syncState.UpsertAsync(new SyncState
             {
@@ -114,8 +129,6 @@ public sealed class DeviceSyncService
                 LastError = null,
             }, ct);
 
-            string summary = $"users +{plan.UsersToUpsert.Count}, fingerprints +{plan.FingerprintsToUpsert.Count}, " +
-                             $"deletes {plan.EmployeesToDelete.Count} (IN {inUsers.Count} users / OUT {outUsers.Count} users)";
             await _log.LogAsync(pair.Out.Ip, DeviceRole.Out, LogOperation.Sync, LogStatus.Ok, summary, ct, pair.Id, (int)sw.ElapsedMilliseconds);
             _logger.LogInformation("Pair {Location} synced: {Summary}", pair.Location, summary);
         }
@@ -147,6 +160,17 @@ public sealed class DeviceSyncService
     {
         await device.DisposeAsync();
         await _log.LogAsync(ip, role, LogOperation.Disconnect, LogStatus.Ok, "disconnected", ct, pair.Id);
+    }
+
+    /// <summary>Applies a plan to one device: users first (a fingerprint references its user), then fingerprints, then deletes.</summary>
+    private static async Task ApplyAsync(IAccessDevice target, SyncPlan plan, CancellationToken ct)
+    {
+        foreach (var user in plan.UsersToUpsert)
+            await target.UpsertUserAsync(user, ct);
+        foreach (var fp in plan.FingerprintsToUpsert)
+            await target.UpsertFingerprintAsync(fp, ct);
+        foreach (var employeeNo in plan.EmployeesToDelete)
+            await target.DeleteUserAsync(employeeNo, ct);
     }
 
     private static async Task<List<T>> ReadAllAsync<T>(IAsyncEnumerable<T> source)

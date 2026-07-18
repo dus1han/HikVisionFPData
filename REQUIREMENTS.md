@@ -217,10 +217,14 @@ HCNetSDK supports alarm/event upload via `NET_DVR_SetupAlarmChan_V41` + message 
 
 ---
 
-## 6. Functional Requirement B — User & Fingerprint Sync (IN → OUT)
+## 6. Functional Requirement B — User & Fingerprint Sync (two-way union)
 
 ### 6.1 Principle
-The **IN** terminal is the single source of truth for enrollment. The sync job makes the **OUT** terminal's user + fingerprint set match the IN terminal's.
+**Both terminals in a couple must end up holding the complete set of users + fingerprints for that couple.** The sync compares the two devices and copies to each whatever the *other* has that it is missing — so a person can be enrolled on **either** terminal and will be present on both.
+
+- **Additive only.** It copies missing records; it never overwrites a record that already exists on the target (a record present on both, but differing, is left alone — otherwise the two devices would overwrite each other on every cycle) and never deletes.
+- **Only users with a fingerprint** are synced (`Sync:OnlyUsersWithFingerprints`, default on).
+- Set `Sync:Bidirectional=false` for the legacy one-way behaviour where **IN** is the master and **OUT** mirrors it (that mode still supports `DeleteRemovedUsers`).
 
 ### 6.2 Trigger
 `SyncJob` on a configurable interval (default **5 min**, or on-demand via a control signal). Per pair.

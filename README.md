@@ -114,7 +114,11 @@ dotnet publish src/HikSync.Service -c Release -r win-x64 -o C:\HikSync
   number is only the ordering cursor. Verified by `AttendanceCollectorTests` (incl. serial-reset).
 - **Clock-in vs clock-out** = which terminal (IN/OUT) produced the event, not a device status field.
 - **Any successful verification counts** as a punch by default (`Attendance:CountedVerifyModes`).
-- **Sync** is IN→OUT, delete-off by default (`Sync:DeleteRemovedUsers`).
+- **Sync is a two-way union** (`Sync:Bidirectional`, default on): each device in a couple receives the
+  users/fingerprints the other has and it lacks, so both hold the complete set. Additive only — never
+  overwrites a differing record (which would make two devices ping-pong) and never deletes. Only users
+  with a fingerprint are synced (`Sync:OnlyUsersWithFingerprints`). Set `Bidirectional=false` for the
+  legacy one-way IN→OUT master/slave behaviour.
 - **Audit log** (`operation_log` table): every device transaction connect→operation→disconnect is
   recorded with device IP, IN/OUT role, operation, status, message and duration. Writes are
   best-effort (never break the flow).

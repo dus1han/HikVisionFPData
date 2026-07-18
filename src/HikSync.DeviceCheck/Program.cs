@@ -288,28 +288,50 @@ static async Task SyncTo(IAccessDeviceFactory factory, DeviceEndpoint src, Devic
     await using var s = await factory.ConnectAsync(src, ct);
     await using var d = await factory.ConnectAsync(dst, ct);
 
-    var allUsers = new List<DeviceUser>();
-    await foreach (var u in s.ReadUsersAsync(ct)) allUsers.Add(u);
-    var fps = new List<FingerprintTemplate>();
-    await foreach (var f in s.ReadFingerprintsAsync(ct)) fps.Add(f);
+    // Read both sides.
+    var srcUsersAll = new List<DeviceUser>();
+    await foreach (var u in s.ReadUsersAsync(ct)) srcUsersAll.Add(u);
+    var srcFps = new List<FingerprintTemplate>();
+    await foreach (var f in s.ReadFingerprintsAsync(ct)) srcFps.Add(f);
 
-    // Sync only users that have at least one fingerprint.
-    var withFp = new HashSet<string>(fps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
-    var users = allUsers.Where(u => withFp.Contains(u.EmployeeNo)).ToList();
-    Console.WriteLine($"Source: {allUsers.Count} user(s), {fps.Count} fingerprint(s). Syncing {users.Count} user(s) that have fingerprints.\n");
+    var dstUsersAll = new List<DeviceUser>();
+    await foreach (var u in d.ReadUsersAsync(ct)) dstUsersAll.Add(u);
+    var dstFps = new List<FingerprintTemplate>();
+    await foreach (var f in d.ReadFingerprintsAsync(ct)) dstFps.Add(f);
 
-    int uOk = 0, uErr = 0, fOk = 0, fErr = 0;
-    foreach (var u in users)
+    // Only users that have a fingerprint.
+    var srcWithFp = new HashSet<string>(srcFps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
+    var dstWithFp = new HashSet<string>(dstFps.Select(f => f.EmployeeNo), StringComparer.Ordinal);
+    var srcUsers = srcUsersAll.Where(u => srcWithFp.Contains(u.EmployeeNo)).ToList();
+    var dstUsers = dstUsersAll.Where(u => dstWithFp.Contains(u.EmployeeNo)).ToList();
+
+    Console.WriteLine($"{src.Ip}: {srcUsers.Count} user(s) w/ fp, {srcFps.Count} fingerprint(s)");
+    Console.WriteLine($"{dst.Ip}: {dstUsers.Count} user(s) w/ fp, {dstFps.Count} fingerprint(s)");
+    Console.WriteLine("Union sync — each device gets what it's missing.\n");
+
+    var toDst = SyncPlanner.BuildMissingOnly(srcUsers, srcFps, dstUsers, dstFps);
+    var toSrc = SyncPlanner.BuildMissingOnly(dstUsers, dstFps, srcUsers, srcFps);
+
+    int ok = 0, err = 0;
+    async Task Apply(IAccessDevice target, string label, SyncPlan plan)
     {
-        try { await d.UpsertUserAsync(u, ct); uOk++; Console.WriteLine($"  user {u.EmployeeNo} -> OK"); }
-        catch (Exception ex) { uErr++; Console.WriteLine($"  user {u.EmployeeNo} -> FAIL: {ex.Message}"); }
+        if (plan.IsEmpty) { Console.WriteLine($"  -> {label}: nothing missing"); return; }
+        foreach (var u in plan.UsersToUpsert)
+        {
+            try { await target.UpsertUserAsync(u, ct); ok++; Console.WriteLine($"  -> {label}: user {u.EmployeeNo} OK"); }
+            catch (Exception ex) { err++; Console.WriteLine($"  -> {label}: user {u.EmployeeNo} FAIL: {ex.Message}"); }
+        }
+        foreach (var f in plan.FingerprintsToUpsert)
+        {
+            try { await target.UpsertFingerprintAsync(f, ct); ok++; Console.WriteLine($"  -> {label}: fingerprint {f.EmployeeNo}#{f.FingerIndex} ({f.Template.Length}b) OK"); }
+            catch (Exception ex) { err++; Console.WriteLine($"  -> {label}: fingerprint {f.EmployeeNo}#{f.FingerIndex} FAIL: {ex.Message}"); }
+        }
     }
-    foreach (var f in fps)
-    {
-        try { await d.UpsertFingerprintAsync(f, ct); fOk++; Console.WriteLine($"  fingerprint {f.EmployeeNo}#{f.FingerIndex} ({f.Template.Length}b) -> OK"); }
-        catch (Exception ex) { fErr++; Console.WriteLine($"  fingerprint {f.EmployeeNo}#{f.FingerIndex} -> FAIL: {ex.Message}"); }
-    }
-    Console.WriteLine($"\nSync done. Users {uOk} ok / {uErr} fail. Fingerprints {fOk} ok / {fErr} fail.");
+
+    await Apply(d, dst.Ip, toDst);
+    await Apply(s, src.Ip, toSrc);
+
+    Console.WriteLine($"\nUnion sync done. {ok} written, {err} failed. Both devices should now hold the same set.");
 }
 
 static async Task RunProbe(string ip, int port, string user, string pass, string emp)
