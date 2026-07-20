@@ -15,8 +15,8 @@ Two independent artifacts. Both are **self-contained x64 Windows builds — no .
 
 | Artifact | Publish folder | Purpose | Needs |
 |---|---|---|---|
-| **HikSync.Service** | `C:\Users\Saboor.a\Desktop\HikSync\` | The 24/7 service: capture attendance → local Postgres → push to your API, plus the two-way fingerprint sync. Runs as a Windows service. | Postgres + network to the terminals + `appsettings.json` |
-| **HikSync.DeviceCheck** | `C:\Users\Saboor.a\Desktop\HikSync-DeviceCheck\` | Diagnostics & maintenance CLI: verify a terminal, list users/fingerprints/attendance, delete users, one-off union sync, raw ISAPI probe. | Network to the terminals only — **no database, no config file** |
+| **HikSync.Service** | `C:\Users\Saboor.a\Desktop\Personal\HikSync\` | The 24/7 service: capture attendance → local Postgres → push to your API, plus the two-way fingerprint sync. Runs as a Windows service. | Postgres + network to the terminals + `appsettings.json` |
+| **HikSync.DeviceCheck** | `C:\Users\Saboor.a\Desktop\Personal\HikSync-DeviceCheck\` | Diagnostics & maintenance CLI: verify a terminal, list users/fingerprints/attendance, delete users, one-off union sync, raw ISAPI probe. | Network to the terminals only — **no database, no config file** |
 
 **Deploy the service** on a machine that stays on (the one with/near Postgres, reachable to the
 terminals). **Deploy the tool** anywhere convenient — a technician's laptop is fine; just copy the
@@ -33,7 +33,7 @@ so it's a complete, self-contained deployment package.
 - **PostgreSQL** (local on that host, or reachable over the network).
 - The terminals set to the **correct timezone (Sri Lanka, UTC+05:30) with NTP enabled** — do this on
   each device (web UI / iVMS-4200 → Time). Times are only correct if the device clock is correct.
-- The published service folder: **`C:\Users\Saboor.a\Desktop\HikSync\`** (or publish it yourself —
+- The published service folder: **`C:\Users\Saboor.a\Desktop\Personal\HikSync\`** (or publish it yourself —
   see §7). It's self-contained, so **no .NET install is required** on the host.
 
 ---
@@ -75,7 +75,7 @@ VALUES ('Main Gate', '192.168.1.220', 'admin', '123456bio', '192.168.1.219', 'ad
 
 ## 3. Configure `appsettings.json`
 
-Edit `C:\Users\Saboor.a\Desktop\HikSync\appsettings.json`:
+Edit `C:\Users\Saboor.a\Desktop\Personal\HikSync\appsettings.json`:
 
 ```jsonc
 "LocalDatabase": {
@@ -123,7 +123,7 @@ Edit `C:\Users\Saboor.a\Desktop\HikSync\appsettings.json`:
 ## 4. Run it (console first, to watch logs)
 
 ```powershell
-cd C:\Users\Saboor.a\Desktop\HikSync
+cd C:\Users\Saboor.a\Desktop\Personal\HikSync
 .\HikSync.Service.exe
 ```
 You should see: DB migration on startup, then each cycle logging "Attendance cycle done: N new row(s)…".
@@ -134,7 +134,7 @@ Make a punch on a terminal and watch a new row appear. `Ctrl+C` to stop.
 ## 5. Install as a Windows service (runs 24/7, auto-restart)
 
 ```powershell
-.\scripts\install-service.ps1 -BinPath C:\Users\Saboor.a\Desktop\HikSync\HikSync.Service.exe
+.\scripts\install-service.ps1 -BinPath C:\Users\Saboor.a\Desktop\Personal\HikSync\HikSync.Service.exe
 ```
 Manage it: `Get-Service HikSync`, `Stop-Service HikSync`, `Start-Service HikSync`.
 Uninstall: `.\scripts\uninstall-service.ps1`.
@@ -172,15 +172,18 @@ git clone git@github.com:dus1han/HikVisionFPData.git
 cd HikVisionFPData
 
 # service
-dotnet publish src\HikSync.Service -c Release -r win-x64 --self-contained true -o C:\HikSync
+dotnet publish src\HikSync.Service -c Release -r win-x64 --self-contained true -o C:\Users\Saboor.a\Desktop\Personal\HikSync
 # tool
-dotnet publish src\HikSync.DeviceCheck -c Release -r win-x64 --self-contained true -o C:\HikCheck
+dotnet publish src\HikSync.DeviceCheck -c Release -r win-x64 --self-contained true -o C:\Users\Saboor.a\Desktop\Personal\HikSync-DeviceCheck
 
 # bundle the helper scripts + guides with the service (optional but handy)
-Copy-Item scripts C:\HikSync\scripts -Recurse -Force
-Copy-Item DEPLOYMENT.md,README.md C:\HikSync -Force
+Copy-Item scripts C:\Users\Saboor.a\Desktop\Personal\HikSync\scripts -Recurse -Force
+Copy-Item DEPLOYMENT.md,README.md C:\Users\Saboor.a\Desktop\Personal\HikSync -Force
 ```
-Then copy `C:\HikSync` to the service host and `C:\HikCheck` wherever you need the tool.
+Republishing **overwrites `appsettings.json` with the placeholder template** — back up your
+configured copy first, or re-apply §3 afterwards.
+
+Then copy the `HikSync` folder to the service host and `HikSync-DeviceCheck` wherever you need the tool.
 Run the tests with `dotnet test` (17 should pass).
 
 ---
@@ -192,7 +195,7 @@ laptop, the service host, a USB stick). No install, no database, no config — i
 the command line. It must be able to reach the terminals on the network (HTTP port 80 by default).
 
 ```powershell
-cd C:\Users\Saboor.a\Desktop\HikSync-DeviceCheck
+cd C:\Users\Saboor.a\Desktop\Personal\HikSync-DeviceCheck
 .\HikSync.DeviceCheck.exe --help
 ```
 
