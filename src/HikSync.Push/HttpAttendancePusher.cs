@@ -72,6 +72,8 @@ public sealed class HttpAttendancePusher : IAttendancePusher
         }
 
         // 5xx / other -> transient: throw so the batch stays pending and is retried next cycle.
+        // Log the body first — without it a 500 gives no clue what the remote API actually choked on.
+        _logger.LogError("Remote API push failed ({Code}): {Body}", code, await SafeReadBodyAsync(response));
         throw new HttpRequestException($"Remote API push failed with status {code}.");
     }
 
