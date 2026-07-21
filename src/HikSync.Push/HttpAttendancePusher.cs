@@ -103,14 +103,20 @@ public sealed class HttpAttendancePusher : IAttendancePusher
     {
         companyId = _options.CompanyId,
         employeeId = int.TryParse(r.EmployeeNo, out var id) ? id : 0,
-        checkTime = LocalTime(r.EventTimeUtc).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+        checkTime = LocalTime(r.EventTimeUtc),
         checkType = r.Role == DeviceRole.In ? "IN" : "OUT",
         source = $"{r.Location}({r.DeviceIp})",
     };
 
-    private DateTime LocalTime(DateTime utc)
+    /// <summary>
+    /// Event time in <see cref="PushOptions.TimeZone"/>. Returned as a DateTimeOffset so it serialises
+    /// to ISO-8601 with the offset ("2026-07-17T14:53:13+05:30"): the API binds checkTime to a
+    /// DateTimeOffset, and System.Text.Json rejects any other shape — which fails the whole batch.
+    /// </summary>
+    private DateTimeOffset LocalTime(DateTime utc)
     {
         var u = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
-        return _timeZone is null ? u : TimeZoneInfo.ConvertTimeFromUtc(u, _timeZone);
+        if (_timeZone is null) return new DateTimeOffset(u);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeFromUtc(u, _timeZone), _timeZone.GetUtcOffset(u));
     }
 }

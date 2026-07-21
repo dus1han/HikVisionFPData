@@ -10,6 +10,12 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Serilog;
 
+// A Windows service starts with its working directory set to C:\Windows\System32, so Serilog's
+// relative "logs/" path would write there instead of next to the exe. AddWindowsService fixes the
+// content root (config resolution) but not the working directory, so pin it here — before the
+// builder reads configuration.
+Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+
 var builder = Host.CreateApplicationBuilder(args);
 
 // Run as a Windows Service (also runs fine as a console app for local debugging).
