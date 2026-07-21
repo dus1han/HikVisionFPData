@@ -16,5 +16,13 @@ public interface IAttendancePusher
 
 public sealed record PushResult(IReadOnlyList<string> AcceptedKeys, IReadOnlyList<string> RejectedKeys)
 {
+    /// <summary>
+    /// Why each rejected key was rejected, keyed by idempotency key. Recorded per row in
+    /// <c>attendance_events.last_upload_error</c> so an operator can see the actual reason
+    /// ("no employee with em_number '999'") instead of a generic failure message.
+    /// Null when the destination gave no per-record detail.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? Errors { get; init; }
+
     public static PushResult None { get; } = new(Array.Empty<string>(), Array.Empty<string>());
 }

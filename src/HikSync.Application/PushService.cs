@@ -48,7 +48,13 @@ public sealed class PushService
             await _attendance.MarkUploadedAsync(result.AcceptedKeys, ct);
 
         if (result.RejectedKeys.Count > 0)
-            await _attendance.MarkAttemptFailedAsync(result.RejectedKeys, "rejected by central push", _options.MaxAttempts, ct);
+        {
+            // Prefer the destination's own per-row reason so last_upload_error is actionable.
+            if (result.Errors is { Count: > 0 })
+                await _attendance.MarkAttemptFailedAsync(result.Errors, _options.MaxAttempts, ct);
+            else
+                await _attendance.MarkAttemptFailedAsync(result.RejectedKeys, "rejected by central push", _options.MaxAttempts, ct);
+        }
 
         _health.LastPushSuccessUtc = DateTime.UtcNow;
         _health.PendingBacklog = await _attendance.CountPendingAsync(ct);

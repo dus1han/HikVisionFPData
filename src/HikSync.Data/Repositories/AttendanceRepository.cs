@@ -120,6 +120,29 @@ public sealed class AttendanceRepository : IAttendanceRepository
             sql, new { keys = idempotencyKeys.ToArray(), error, maxAttempts }, cancellationToken: ct));
     }
 
+    public async Task MarkAttemptFailedAsync(
+        IReadOnlyDictionary<string, string> errorsByKey, int maxAttempts, CancellationToken ct)
+    {
+        if (errorsByKey.Count == 0) return;
+
+        // Paired arrays unnested into rows, so every key gets its own message in one round trip.
+        const string sql = """
+            UPDATE attendance_events a
+            SET upload_attempts = a.upload_attempts + 1,
+                last_upload_error = v.error,
+                upload_status = CASE WHEN a.upload_attempts + 1 >= @maxAttempts THEN 'dead_letter' ELSE a.upload_status END
+            FROM (SELECT unnest(@keys::text[]) AS key, unnest(@errors::text[]) AS error) v
+            WHERE a.idempotency_key = v.key;
+            """;
+
+        var keys = errorsByKey.Keys.ToArray();
+        var errors = keys.Select(k => errorsByKey[k]).ToArray();
+
+        await using var conn = await _factory.OpenAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            sql, new { keys, errors, maxAttempts }, cancellationToken: ct));
+    }
+
     public async Task<int> CountPendingAsync(CancellationToken ct)
     {
         const string sql = "SELECT count(*) FROM attendance_events WHERE upload_status = 'pending';";

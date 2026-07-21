@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using HikSync.Core.Abstractions;
 using HikSync.Core.Configuration;
 using HikSync.Core.Models;
@@ -60,7 +61,7 @@ public sealed class HttpAttendancePusher : IAttendancePusher
         HttpResponseMessage response = await client.SendAsync(request, ct); // network/timeout -> throws -> retry
 
         if (response.IsSuccessStatusCode)
-            return new PushResult(keys, Array.Empty<string>());
+            return await InterpretAcceptedAsync(response, keys);
 
         int code = (int)response.StatusCode;
         if (response.StatusCode is >= HttpStatusCode.BadRequest and < HttpStatusCode.InternalServerError)
@@ -76,6 +77,76 @@ public sealed class HttpAttendancePusher : IAttendancePusher
         _logger.LogError("Remote API push failed ({Code}): {Body}", code, await SafeReadBodyAsync(response));
         throw new HttpRequestException($"Remote API push failed with status {code}.");
     }
+
+    /// <summary>
+    /// A 2xx does not mean every row was stored. The API inserts what it can and reports the rest —
+    /// so treating the whole batch as accepted marks skipped rows 'uploaded' locally and loses them
+    /// silently. Honour the per-record result when the response carries one, and fall back to
+    /// whole-batch acceptance only for an endpoint that says nothing (the older contract).
+    /// </summary>
+    private async Task<PushResult> InterpretAcceptedAsync(HttpResponseMessage response, List<string> keys)
+    {
+        string body = await SafeReadBodyAsync(response);
+        if (string.IsNullOrWhiteSpace(body)) return new PushResult(keys, Array.Empty<string>());
+
+        BulkInsertResponse? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<BulkInsertResponse>(body,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Push response was not JSON; treating the batch as accepted. Body: {Body}", Trim(body));
+            return new PushResult(keys, Array.Empty<string>());
+        }
+
+        // No skip list at all -> an endpoint on the old contract. Keep the previous behaviour.
+        if (parsed?.SkippedRecords is null) return new PushResult(keys, Array.Empty<string>());
+
+        var skipped = parsed.SkippedRecords;
+        if (skipped.Count == 0) return new PushResult(keys, Array.Empty<string>());
+
+        // Duplicates are benign: the row is already stored centrally, so it is genuinely done. Only a
+        // real failure (unknown employee, invalid, ambiguous) should count against the row.
+        var lost = skipped
+            .Where(s => !string.Equals(s.Reason, "Duplicate", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var errorsByKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var s in lost)
+        {
+            if (string.IsNullOrWhiteSpace(s.Key)) continue;
+            errorsByKey[s.Key] = string.IsNullOrWhiteSpace(s.Detail) ? s.Reason : $"{s.Reason}: {s.Detail}";
+        }
+
+        var acceptedKeys = keys.Where(k => !errorsByKey.ContainsKey(k)).ToList();
+
+        foreach (var s in lost.Take(5))
+            _logger.LogWarning("Central API did not store {EmployeeNo} @ {CheckTime}: {Reason} — {Detail}",
+                s.EmployeeNo, s.CheckTime, s.Reason, s.Detail);
+
+        if (lost.Count > 5)
+            _logger.LogWarning("...and {More} more record(s) not stored.", lost.Count - 5);
+
+        return new PushResult(acceptedKeys, errorsByKey.Keys.ToList()) { Errors = errorsByKey };
+    }
+
+    private sealed class BulkInsertResponse
+    {
+        public List<SkippedRecordDto>? SkippedRecords { get; set; }
+    }
+
+    private sealed class SkippedRecordDto
+    {
+        public string Key { get; set; } = string.Empty;
+        public string EmployeeNo { get; set; } = string.Empty;
+        public string Reason { get; set; } = string.Empty;
+        public string Detail { get; set; } = string.Empty;
+        public DateTimeOffset CheckTime { get; set; }
+    }
+
+    private static string Trim(string s) => s.Length <= 500 ? s : s[..500] + "…";
 
     private void ApplyAuth(HttpRequestMessage request)
     {
@@ -104,7 +175,12 @@ public sealed class HttpAttendancePusher : IAttendancePusher
     private object ToDto(AttendanceRecord r) => new
     {
         companyId = _options.CompanyId,
+        // The device number as a string, so a leading zero ("05") survives — parsing it to an int
+        // destroys that and can resolve to the wrong employee. employeeId stays for older endpoints.
+        employeeNo = r.EmployeeNo,
         employeeId = int.TryParse(r.EmployeeNo, out var id) ? id : 0,
+        // Echoed back in the skip list, which is how per-row failures are attributed.
+        idempotencyKey = r.IdempotencyKey,
         checkTime = LocalTime(r.EventTimeUtc),
         checkType = r.Role == DeviceRole.In ? "IN" : "OUT",
         source = $"{r.Location}({r.DeviceIp})",

@@ -69,6 +69,17 @@ internal sealed class InMemoryAttendanceRepository : IAttendanceRepository
         return Task.CompletedTask;
     }
 
+    public Task MarkAttemptFailedAsync(IReadOnlyDictionary<string, string> errorsByKey, int maxAttempts, CancellationToken ct)
+    {
+        foreach (var r in Rows.Where(r => errorsByKey.ContainsKey(r.IdempotencyKey)))
+        {
+            r.UploadAttempts++;
+            r.LastUploadError = errorsByKey[r.IdempotencyKey];
+            if (r.UploadAttempts >= maxAttempts) r.UploadStatus = UploadStatus.DeadLetter;
+        }
+        return Task.CompletedTask;
+    }
+
     public Task<int> CountPendingAsync(CancellationToken ct) =>
         Task.FromResult(Rows.Count(r => r.UploadStatus == UploadStatus.Pending));
 }

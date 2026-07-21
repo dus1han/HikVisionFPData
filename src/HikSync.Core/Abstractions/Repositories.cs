@@ -24,6 +24,13 @@ public interface IAttendanceRepository
 
     Task MarkAttemptFailedAsync(IReadOnlyCollection<string> idempotencyKeys, string error, int maxAttempts, CancellationToken ct);
 
+    /// <summary>
+    /// Same as <see cref="MarkAttemptFailedAsync(IReadOnlyCollection{string}, string, int, CancellationToken)"/>
+    /// but records a distinct reason per row, so <c>last_upload_error</c> carries the destination's
+    /// actual message for that punch rather than one shared summary.
+    /// </summary>
+    Task MarkAttemptFailedAsync(IReadOnlyDictionary<string, string> errorsByKey, int maxAttempts, CancellationToken ct);
+
     Task<int> CountPendingAsync(CancellationToken ct);
 }
 
