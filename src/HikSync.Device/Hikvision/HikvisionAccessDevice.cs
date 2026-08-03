@@ -395,9 +395,13 @@ public sealed class HikvisionAccessDevice : IAccessDevice
                 int status = NET_DVR_SendWithRecvRemoteConfig(handle, inPtr, inSize, outPtr, (uint)outSize, ref returned);
                 switch (status)
                 {
-                    case SEND_STATUS_SUCCESS: break;          // accepted; next call returns FINISH
+                    // For a single-record set, SUCCESS is the terminal state — the device accepted the
+                    // record. Re-sending the same record just re-accepts it and never yields FINISH,
+                    // which is why this used to spin to the guard limit and throw with error 0.
+                    case SEND_STATUS_SUCCESS:
+                    case SEND_STATUS_FINISH:
+                        return;
                     case SEND_STATUS_NEEDWAIT: Thread.Sleep(20); break;
-                    case SEND_STATUS_FINISH: return;
                     default: throw new HcNetSdkException($"NET_DVR_SendWithRecvRemoteConfig({op})", NET_DVR_GetLastError());
                 }
             }

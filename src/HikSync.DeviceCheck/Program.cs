@@ -417,11 +417,30 @@ static async Task<int> RunFpSdkWriteback(
         var sdkFactory = new HikvisionDeviceFactory(sdkMgr, lf);
         await using var sdkDev = await sdkFactory.ConnectAsync(endpoint, ct);
         await sdkDev.UpsertFingerprintAsync(fp, ct);
-        Console.WriteLine("[ OK ] SDK NET_DVR_SET_FINGERPRINT accepted the template.");
-        Console.WriteLine("      If this holds, fingerprint sync can run over the SDK. Verify by re-probing the employee.");
-        return 0;
+        Console.WriteLine("[ OK ] SDK NET_DVR_SET_FINGERPRINT accepted the template.\n");
     }
     catch (Exception ex) { Console.WriteLine("[FAIL] SDK write failed: " + ex.Message); return 1; }
+
+    // 3. Verify: read the fingerprint back over ISAPI and compare bytes. "Accepted" is not enough —
+    // the stored template must match what we sent, or it would be an unusable print that authenticates
+    // no one. Identical bytes prove the SDK faithfully stored the ISAPI-read template.
+    try
+    {
+        var verifyFactory = new HikSync.Device.Isapi.IsapiAccessDeviceFactory(sdkOptions, lf);
+        await using var verifyDev = await verifyFactory.ConnectAsync(endpoint, ct);
+        FingerprintTemplate? after = null;
+        await foreach (var f in verifyDev.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal) && f.FingerIndex == fp.FingerIndex) { after = f; break; }
+
+        if (after is null)
+            Console.WriteLine("[WARN] verify: fingerprint no longer reads back — the write may not have stored.");
+        else if (after.Template.AsSpan().SequenceEqual(fp.Template))
+            Console.WriteLine($"[ OK ] verify: read back {after.Template.Length} bytes, IDENTICAL. SDK fingerprint transfer works — sync can be routed over the SDK.");
+        else
+            Console.WriteLine($"[WARN] verify: read back {after.Template.Length} bytes but DIFFERENT from what we wrote — the template format may not survive the round-trip.");
+        return 0;
+    }
+    catch (Exception ex) { Console.WriteLine("[WARN] verify read failed: " + ex.Message); return 0; }
 }
 
 // Reads <emp>'s own fingerprint and writes it straight back under several payload shapes, to find the
