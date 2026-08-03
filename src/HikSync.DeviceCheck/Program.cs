@@ -49,6 +49,8 @@ if (flags.Contains("help") || (args.Length == 0))
           --probe <emp>      dump raw ISAPI responses (capabilities + fingerprint) for an employee
           --fp-selftest <emp>  find the FingerPrintDownload payload this firmware accepts (writes the
                                employee's own fingerprint back unchanged — safe in production)
+          --fp-sdk-writeback <emp>  read fingerprint via ISAPI, write it back via HCNetSDK (needs
+                               --transport sdk --port 8000). Tests the iVMS method. Non-destructive.
           --delete <emp[,emp]>    DELETE the given user(s); use "all" to delete everyone
           --delete-others <emp>   DELETE every user on the device except <emp>
           --sync-to <ip>     copy users + fingerprints from --ip to this target device
@@ -126,6 +128,14 @@ string target = fake ? "FAKE device"
     : isapi ? $"{(sdkOptions.Value.IsapiHttps ? "https" : "http")}://{ip}:{sdkOptions.Value.IsapiPort} (ISAPI)"
     : $"{endpoint} (SDK, loginMode={modeName})";
 Console.WriteLine($"HikSync.DeviceCheck -> {target}  (user={endpoint.Username})");
+
+// Diagnostic: --fp-sdk-writeback <emp> reads the employee's fingerprint via ISAPI and writes it back
+// to the SAME device via the HCNetSDK (NET_DVR_SET_FINGERPRINT) — the path iVMS uses. Non-destructive.
+// Run with --transport sdk --port 8000.
+if (opts.TryGetValue("fp-sdk-writeback", out var fpwEmp))
+{
+    return await RunFpSdkWriteback(sdkOptions, loggerFactory, endpoint, fpwEmp, ct);
+}
 
 // Maintenance modes (run instead of the standard checks).
 if (opts.TryGetValue("delete", out var delSpec))
@@ -375,6 +385,43 @@ static async Task RunProbe(string ip, int port, string user, string pass, string
     await Hit("UserInfo capabilities", HttpMethod.Get, "/ISAPI/AccessControl/UserInfo/capabilities?format=json", null);
     await Hit("FingerPrint write capabilities", HttpMethod.Get, "/ISAPI/AccessControl/FingerPrintDownload/capabilities?format=json", null);
     await Hit("Face lib capabilities", HttpMethod.Get, "/ISAPI/Intelligent/FDLib/capabilities?format=json", null);
+}
+
+// Reads <emp>'s fingerprint via ISAPI, then writes it back to the SAME device via the HCNetSDK. Tests
+// whether NET_DVR_SET_FINGERPRINT accepts the template (the method iVMS uses). Non-destructive.
+static async Task<int> RunFpSdkWriteback(
+    Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
+    ILoggerFactory lf, DeviceEndpoint endpoint, string emp, CancellationToken ct)
+{
+    Console.WriteLine($"\nFP SDK WRITEBACK  employee={emp}");
+    Console.WriteLine("Read via ISAPI, write back via HCNetSDK NET_DVR_SET_FINGERPRINT.\n");
+
+    // 1. Read the template over ISAPI (proven to work).
+    FingerprintTemplate? fp = null;
+    try
+    {
+        var isapiFactory = new HikSync.Device.Isapi.IsapiAccessDeviceFactory(sdkOptions, lf);
+        await using var readDev = await isapiFactory.ConnectAsync(endpoint, ct);
+        await foreach (var f in readDev.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal)) { fp = f; break; }
+    }
+    catch (Exception ex) { Console.WriteLine("[FAIL] ISAPI read failed: " + ex.Message); return 1; }
+
+    if (fp is null) { Console.WriteLine($"no fingerprint read for employee {emp} via ISAPI."); return 1; }
+    Console.WriteLine($"ISAPI read OK: finger {fp.FingerIndex}, {fp.Template.Length} bytes.\n");
+
+    // 2. Write it back via the SDK (port 8000).
+    try
+    {
+        var sdkMgr = new HcNetSdkManager(sdkOptions, lf.CreateLogger<HcNetSdkManager>());
+        var sdkFactory = new HikvisionDeviceFactory(sdkMgr, lf);
+        await using var sdkDev = await sdkFactory.ConnectAsync(endpoint, ct);
+        await sdkDev.UpsertFingerprintAsync(fp, ct);
+        Console.WriteLine("[ OK ] SDK NET_DVR_SET_FINGERPRINT accepted the template.");
+        Console.WriteLine("      If this holds, fingerprint sync can run over the SDK. Verify by re-probing the employee.");
+        return 0;
+    }
+    catch (Exception ex) { Console.WriteLine("[FAIL] SDK write failed: " + ex.Message); return 1; }
 }
 
 // Reads <emp>'s own fingerprint and writes it straight back under several payload shapes, to find the
