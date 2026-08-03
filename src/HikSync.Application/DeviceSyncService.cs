@@ -15,6 +15,7 @@ public sealed class DeviceSyncService
 {
     private readonly IDevicePairRepository _pairs;
     private readonly ISyncStateRepository _syncState;
+    private readonly ISyncFailureRepository _syncFailures;
     private readonly IAccessDeviceFactory _factory;
     private readonly OperationLogger _log;
     private readonly SyncOptions _options;
@@ -24,6 +25,7 @@ public sealed class DeviceSyncService
     public DeviceSyncService(
         IDevicePairRepository pairs,
         ISyncStateRepository syncState,
+        ISyncFailureRepository syncFailures,
         IAccessDeviceFactory factory,
         OperationLogger log,
         IOptions<SyncOptions> options,
@@ -32,6 +34,7 @@ public sealed class DeviceSyncService
     {
         _pairs = pairs;
         _syncState = syncState;
+        _syncFailures = syncFailures;
         _factory = factory;
         _log = log;
         _options = options.Value;
@@ -97,29 +100,33 @@ public sealed class DeviceSyncService
             }
 
             string summary;
+            var fails = new List<SyncFailure>();
             if (_options.Bidirectional)
             {
                 // Union: give each device whatever the other has that it's missing.
                 var toOut = SyncPlanner.BuildMissingOnly(inUsers, inFps, outUsers, outFps);
                 var toIn = SyncPlanner.BuildMissingOnly(outUsers, outFps, inUsers, inFps);
 
-                int outFail = await ApplyAsync(outDevice, pair.Out.Ip, toOut, ct);
-                int inFail = await ApplyAsync(inDevice, pair.In.Ip, toIn, ct);
+                fails.AddRange(await ApplyAsync(outDevice, pair.Id, pair.In.Ip, pair.Out.Ip, toOut, ct));
+                fails.AddRange(await ApplyAsync(inDevice, pair.Id, pair.Out.Ip, pair.In.Ip, toIn, ct));
 
                 summary = $"union: -> OUT users +{toOut.UsersToUpsert.Count}, fp +{toOut.FingerprintsToUpsert.Count}; " +
                           $"-> IN users +{toIn.UsersToUpsert.Count}, fp +{toIn.FingerprintsToUpsert.Count} " +
                           $"(IN {inUsers.Count} users/{inFps.Count} fp, OUT {outUsers.Count} users/{outFps.Count} fp)" +
-                          (outFail + inFail > 0 ? $" [{outFail + inFail} item(s) failed]" : "");
+                          (fails.Count > 0 ? $" [{fails.Count} item(s) failed]" : "");
             }
             else
             {
                 // Legacy one-way: IN is master, OUT mirrors it.
                 var plan = SyncPlanner.Build(inUsers, inFps, outUsers, outFps, _options.DeleteRemovedUsers);
-                int fail = await ApplyAsync(outDevice, pair.Out.Ip, plan, ct);
+                fails.AddRange(await ApplyAsync(outDevice, pair.Id, pair.In.Ip, pair.Out.Ip, plan, ct));
                 summary = $"one-way IN->OUT: users +{plan.UsersToUpsert.Count}, fingerprints +{plan.FingerprintsToUpsert.Count}, " +
                           $"deletes {plan.EmployeesToDelete.Count} (IN {inUsers.Count} users / OUT {outUsers.Count} users)" +
-                          (fail > 0 ? $" [{fail} item(s) failed]" : "");
+                          (fails.Count > 0 ? $" [{fails.Count} item(s) failed]" : "");
             }
+
+            if (fails.Count > 0)
+                await _syncFailures.UpsertAsync(fails, ct);
 
             await _syncState.UpsertAsync(new SyncState
             {
@@ -127,8 +134,8 @@ public sealed class DeviceSyncService
                 LastSyncAtUtc = DateTime.UtcNow,
                 InUserCount = inUsers.Count,
                 OutUserCount = outUsers.Count,
-                LastStatus = "ok",
-                LastError = null,
+                LastStatus = fails.Count == 0 ? "ok" : "partial",
+                LastError = fails.Count == 0 ? null : $"{fails.Count} item(s) failed",
             }, ct);
 
             await _log.LogAsync(pair.Out.Ip, DeviceRole.Out, LogOperation.Sync, LogStatus.Ok, summary, ct, pair.Id, (int)sw.ElapsedMilliseconds);
@@ -173,17 +180,18 @@ public sealed class DeviceSyncService
     /// device they were enrolled on but not on its partner. Returns the number of failed items.
     /// Cancellation is not swallowed: it propagates so shutdown still stops the loop promptly.
     /// </summary>
-    private async Task<int> ApplyAsync(IAccessDevice target, string targetIp, SyncPlan plan, CancellationToken ct)
+    private async Task<List<SyncFailure>> ApplyAsync(
+        IAccessDevice target, long pairId, string sourceIp, string targetIp, SyncPlan plan, CancellationToken ct)
     {
-        int failures = 0;
+        var failures = new List<SyncFailure>();
 
         foreach (var user in plan.UsersToUpsert)
         {
             try { await target.UpsertUserAsync(user, ct); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                failures++;
                 _logger.LogWarning(ex, "Sync: could not upsert user {EmployeeNo} on {Ip}; skipping.", user.EmployeeNo, targetIp);
+                failures.Add(Fail(pairId, sourceIp, targetIp, user.EmployeeNo, 0, "user", ex));
             }
         }
 
@@ -192,9 +200,9 @@ public sealed class DeviceSyncService
             try { await target.UpsertFingerprintAsync(fp, ct); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                failures++;
                 _logger.LogWarning(ex, "Sync: could not upsert fingerprint for {EmployeeNo} (finger {Finger}) on {Ip}; skipping.",
                     fp.EmployeeNo, fp.FingerIndex, targetIp);
+                failures.Add(Fail(pairId, sourceIp, targetIp, fp.EmployeeNo, fp.FingerIndex, "fingerprint", ex));
             }
         }
 
@@ -203,13 +211,25 @@ public sealed class DeviceSyncService
             try { await target.DeleteUserAsync(employeeNo, ct); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                failures++;
                 _logger.LogWarning(ex, "Sync: could not delete user {EmployeeNo} on {Ip}; skipping.", employeeNo, targetIp);
+                failures.Add(Fail(pairId, sourceIp, targetIp, employeeNo, 0, "delete", ex));
             }
         }
 
         return failures;
     }
+
+    private static SyncFailure Fail(long pairId, string sourceIp, string targetIp, string employeeNo, int finger, string op, Exception ex) =>
+        new()
+        {
+            PairId = pairId,
+            SourceIp = sourceIp,
+            TargetIp = targetIp,
+            EmployeeNo = employeeNo,
+            FingerIndex = finger,
+            Operation = op,
+            Error = ex.Message,
+        };
 
     private static async Task<List<T>> ReadAllAsync<T>(IAsyncEnumerable<T> source)
     {

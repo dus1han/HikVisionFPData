@@ -17,6 +17,7 @@ public static class DataServiceCollectionExtensions
         services.AddSingleton<IWatermarkRepository, WatermarkRepository>();
         services.AddSingleton<IAttendanceRepository, AttendanceRepository>();
         services.AddSingleton<ISyncStateRepository, SyncStateRepository>();
+        services.AddSingleton<ISyncFailureRepository, SyncFailureRepository>();
         services.AddSingleton<IOperationLogRepository, OperationLogRepository>();
 
         return services;

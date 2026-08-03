@@ -40,6 +40,12 @@ public interface ISyncStateRepository
     Task UpsertAsync(SyncState state, CancellationToken ct);
 }
 
+public interface ISyncFailureRepository
+{
+    /// <summary>Records each failure, incrementing the attempt count for one already seen.</summary>
+    Task UpsertAsync(IReadOnlyCollection<SyncFailure> failures, CancellationToken ct);
+}
+
 public interface IOperationLogRepository
 {
     Task WriteAsync(OperationLog entry, CancellationToken ct);

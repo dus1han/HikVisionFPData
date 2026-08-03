@@ -111,6 +111,27 @@ CREATE TABLE IF NOT EXISTS operation_log (
 CREATE INDEX IF NOT EXISTS ix_operation_log_time   ON operation_log (logged_at);
 CREATE INDEX IF NOT EXISTS ix_operation_log_device ON operation_log (device_ip, logged_at);
 
+-- Per-item sync failures (which employee failed to sync to which device, and why). Upserted:
+-- one row per outstanding problem, with a running attempt count. A row whose last_seen_at has
+-- stopped advancing has resolved.
+CREATE TABLE IF NOT EXISTS sync_failure (
+    id            bigserial   PRIMARY KEY,
+    pair_id       bigint      REFERENCES device_pairs(id),
+    source_ip     text,
+    target_ip     text        NOT NULL,
+    employee_no   text        NOT NULL,
+    finger_index  int         NOT NULL DEFAULT 0,
+    operation     text        NOT NULL,   -- user | fingerprint | delete
+    error         text,
+    first_seen_at timestamptz NOT NULL DEFAULT now(),
+    last_seen_at  timestamptz NOT NULL DEFAULT now(),
+    attempts      int         NOT NULL DEFAULT 1,
+    CONSTRAINT uq_sync_failure UNIQUE (pair_id, target_ip, employee_no, finger_index, operation)
+);
+
+CREATE INDEX IF NOT EXISTS ix_sync_failure_last_seen ON sync_failure (last_seen_at);
+CREATE INDEX IF NOT EXISTS ix_sync_failure_pair      ON sync_failure (pair_id);
+
 -- --- 3. Grants (if using the least-privilege role above) ---------------------
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO hiksync;
 -- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO hiksync;

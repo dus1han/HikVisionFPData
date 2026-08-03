@@ -40,3 +40,24 @@ public sealed class SyncState
     public string? LastStatus { get; set; }
     public string? LastError { get; set; }
 }
+
+/// <summary>
+/// One item the sync could not apply to a device, recorded so it is queryable from the DB rather
+/// than only the log file. <see cref="TargetIp"/> is the device the write failed on;
+/// <see cref="SourceIp"/> is where the record came from.
+/// </summary>
+public sealed class SyncFailure
+{
+    public long PairId { get; set; }
+    public string? SourceIp { get; set; }
+    public string TargetIp { get; set; } = string.Empty;
+    public string EmployeeNo { get; set; } = string.Empty;
+
+    /// <summary>1..10 for a fingerprint; 0 for user/delete operations.</summary>
+    public int FingerIndex { get; set; }
+
+    /// <summary>user | fingerprint | delete</summary>
+    public string Operation { get; set; } = string.Empty;
+
+    public string? Error { get; set; }
+}
