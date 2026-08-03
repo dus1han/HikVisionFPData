@@ -88,6 +88,14 @@ public sealed class SyncOptions
 
     /// <summary>Only sync users that have at least one fingerprint (skip users without biometrics).</summary>
     public bool OnlyUsersWithFingerprints { get; set; } = true;
+
+    /// <summary>
+    /// Whether to push fingerprint templates between devices. Some firmware (e.g. DS-K1A8503MF-B
+    /// V1.4.1) rejects FingerPrintDownload for its own templates, so template transfer is impossible
+    /// over ISAPI — set false there to stop the futile every-cycle retries while user/card sync
+    /// continues. Fingerprints must then be enrolled on each reader directly.
+    /// </summary>
+    public bool SyncFingerprints { get; set; } = true;
 }
 
 /// <summary>Operation-log retention. A nightly job deletes rows older than <see cref="RetentionDays"/>.</summary>

@@ -203,16 +203,17 @@ public sealed class DeviceSyncService
             }
         }
 
-        foreach (var fp in plan.FingerprintsToUpsert)
-        {
-            try { await target.UpsertFingerprintAsync(fp, ct); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+        if (_options.SyncFingerprints)
+            foreach (var fp in plan.FingerprintsToUpsert)
             {
-                _logger.LogWarning(ex, "Sync: could not upsert fingerprint for {EmployeeNo} (finger {Finger}) on {Ip}; skipping.",
-                    fp.EmployeeNo, fp.FingerIndex, targetIp);
-                failures.Add(Fail(pairId, sourceIp, targetIp, fp.EmployeeNo, fp.FingerIndex, "fingerprint", ex));
+                try { await target.UpsertFingerprintAsync(fp, ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Sync: could not upsert fingerprint for {EmployeeNo} (finger {Finger}) on {Ip}; skipping.",
+                        fp.EmployeeNo, fp.FingerIndex, targetIp);
+                    failures.Add(Fail(pairId, sourceIp, targetIp, fp.EmployeeNo, fp.FingerIndex, "fingerprint", ex));
+                }
             }
-        }
 
         foreach (var employeeNo in plan.EmployeesToDelete)
         {
