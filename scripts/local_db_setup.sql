@@ -132,6 +132,24 @@ CREATE TABLE IF NOT EXISTS sync_failure (
 CREATE INDEX IF NOT EXISTS ix_sync_failure_last_seen ON sync_failure (last_seen_at);
 CREATE INDEX IF NOT EXISTS ix_sync_failure_pair      ON sync_failure (pair_id);
 
+-- A queryable mirror of who is enrolled on each device, refreshed wholesale per device every sync.
+CREATE TABLE IF NOT EXISTS device_enrollment (
+    device_ip         text        NOT NULL,
+    employee_no       text        NOT NULL,
+    pair_id           bigint      REFERENCES device_pairs(id),
+    location          text,
+    role              text        CHECK (role IN ('IN','OUT')),
+    name              text,
+    enabled           boolean     NOT NULL DEFAULT true,
+    fingerprint_count int         NOT NULL DEFAULT 0,
+    finger_ids        int[]       NOT NULL DEFAULT '{}',
+    last_synced_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (device_ip, employee_no)
+);
+
+CREATE INDEX IF NOT EXISTS ix_device_enrollment_emp  ON device_enrollment (employee_no);
+CREATE INDEX IF NOT EXISTS ix_device_enrollment_pair ON device_enrollment (pair_id);
+
 -- --- 3. Grants (if using the least-privilege role above) ---------------------
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO hiksync;
 -- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO hiksync;

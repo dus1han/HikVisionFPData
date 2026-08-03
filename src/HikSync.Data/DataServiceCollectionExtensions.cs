@@ -18,6 +18,7 @@ public static class DataServiceCollectionExtensions
         services.AddSingleton<IAttendanceRepository, AttendanceRepository>();
         services.AddSingleton<ISyncStateRepository, SyncStateRepository>();
         services.AddSingleton<ISyncFailureRepository, SyncFailureRepository>();
+        services.AddSingleton<IDeviceEnrollmentRepository, DeviceEnrollmentRepository>();
         services.AddSingleton<IOperationLogRepository, OperationLogRepository>();
 
         return services;

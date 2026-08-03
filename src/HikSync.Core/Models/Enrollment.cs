@@ -48,6 +48,20 @@ public sealed class SyncState
     public string? LastError { get; set; }
 }
 
+/// <summary>A device's view of one enrolled user, snapshotted into device_enrollment each sync.</summary>
+public sealed class DeviceEnrollment
+{
+    public long PairId { get; set; }
+    public string DeviceIp { get; set; } = string.Empty;
+    public string? Location { get; set; }
+    public DeviceRole Role { get; set; }
+    public string EmployeeNo { get; set; } = string.Empty;
+    public string? Name { get; set; }
+    public bool Enabled { get; set; }
+    public int FingerprintCount { get; set; }
+    public int[] FingerIds { get; set; } = Array.Empty<int>();
+}
+
 /// <summary>
 /// One item the sync could not apply to a device, recorded so it is queryable from the DB rather
 /// than only the log file. <see cref="TargetIp"/> is the device the write failed on;

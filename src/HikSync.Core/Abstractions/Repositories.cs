@@ -46,6 +46,12 @@ public interface ISyncFailureRepository
     Task UpsertAsync(IReadOnlyCollection<SyncFailure> failures, CancellationToken ct);
 }
 
+public interface IDeviceEnrollmentRepository
+{
+    /// <summary>Replaces a device's roster wholesale so the table mirrors the device, deletions included.</summary>
+    Task ReplaceForDeviceAsync(string deviceIp, IReadOnlyCollection<DeviceEnrollment> rows, CancellationToken ct);
+}
+
 public interface IOperationLogRepository
 {
     Task WriteAsync(OperationLog entry, CancellationToken ct);

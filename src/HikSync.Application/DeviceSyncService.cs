@@ -16,6 +16,7 @@ public sealed class DeviceSyncService
     private readonly IDevicePairRepository _pairs;
     private readonly ISyncStateRepository _syncState;
     private readonly ISyncFailureRepository _syncFailures;
+    private readonly IDeviceEnrollmentRepository _enrollment;
     private readonly IAccessDeviceFactory _factory;
     private readonly OperationLogger _log;
     private readonly SyncOptions _options;
@@ -26,6 +27,7 @@ public sealed class DeviceSyncService
         IDevicePairRepository pairs,
         ISyncStateRepository syncState,
         ISyncFailureRepository syncFailures,
+        IDeviceEnrollmentRepository enrollment,
         IAccessDeviceFactory factory,
         OperationLogger log,
         IOptions<SyncOptions> options,
@@ -35,6 +37,7 @@ public sealed class DeviceSyncService
         _pairs = pairs;
         _syncState = syncState;
         _syncFailures = syncFailures;
+        _enrollment = enrollment;
         _factory = factory;
         _log = log;
         _options = options.Value;
@@ -89,6 +92,11 @@ public sealed class DeviceSyncService
             var inFps = await ReadAllAsync(inDevice.ReadFingerprintsAsync(ct));
             var outUsers = await ReadAllAsync(outDevice.ReadUsersAsync(ct));
             var outFps = await ReadAllAsync(outDevice.ReadFingerprintsAsync(ct));
+
+            // Snapshot the full roster of each device (before the fingerprint filter below, so users
+            // without a fingerprint are still recorded). Best-effort — a snapshot failure must not
+            // break the sync itself.
+            await SnapshotEnrollmentAsync(pair, inUsers, inFps, outUsers, outFps, ct);
 
             // Optionally restrict to users that actually have a fingerprint enrolled (both sides).
             if (_options.OnlyUsersWithFingerprints)
@@ -217,6 +225,51 @@ public sealed class DeviceSyncService
         }
 
         return failures;
+    }
+
+    private async Task SnapshotEnrollmentAsync(
+        DevicePair pair, List<DeviceUser> inUsers, List<FingerprintTemplate> inFps,
+        List<DeviceUser> outUsers, List<FingerprintTemplate> outFps, CancellationToken ct)
+    {
+        try
+        {
+            await _enrollment.ReplaceForDeviceAsync(pair.In.Ip,
+                BuildEnrollment(pair.Id, pair.In.Ip, pair.Location, DeviceRole.In, inUsers, inFps), ct);
+            await _enrollment.ReplaceForDeviceAsync(pair.Out.Ip,
+                BuildEnrollment(pair.Id, pair.Out.Ip, pair.Location, DeviceRole.Out, outUsers, outFps), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to snapshot device enrollment for pair {Location}.", pair.Location);
+        }
+    }
+
+    private static List<DeviceEnrollment> BuildEnrollment(
+        long pairId, string ip, string location, DeviceRole role,
+        List<DeviceUser> users, List<FingerprintTemplate> fps)
+    {
+        var fingersByEmp = fps
+            .GroupBy(f => f.EmployeeNo, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Select(f => f.FingerIndex).Distinct().OrderBy(x => x).ToArray(), StringComparer.Ordinal);
+
+        var rows = new List<DeviceEnrollment>(users.Count);
+        foreach (var u in users)
+        {
+            var fingers = fingersByEmp.TryGetValue(u.EmployeeNo, out var f) ? f : Array.Empty<int>();
+            rows.Add(new DeviceEnrollment
+            {
+                PairId = pairId,
+                DeviceIp = ip,
+                Location = location,
+                Role = role,
+                EmployeeNo = u.EmployeeNo,
+                Name = u.Name,
+                Enabled = u.Enabled,
+                FingerprintCount = fingers.Length,
+                FingerIds = fingers,
+            });
+        }
+        return rows;
     }
 
     private static SyncFailure Fail(long pairId, string sourceIp, string targetIp, string employeeNo, int finger, string op, Exception ex) =>
