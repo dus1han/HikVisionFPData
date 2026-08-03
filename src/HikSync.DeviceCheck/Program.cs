@@ -3,6 +3,7 @@ using HikSync.Core.Configuration;
 using HikSync.Core.Logic;
 using HikSync.Core.Models;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using HikSync.Device.Fake;
@@ -459,8 +460,58 @@ static async Task<int> RunFpSelfTest(string ip, int port, string user, string pa
         Console.WriteLine();
     }
 
+    // If inline base64 was refused for every scalar permutation, the template may need to go as raw
+    // binary in a multipart/form-data body (JSON metadata part + binary template part). Part names are
+    // firmware-specific, so try a few. Still non-destructive — the employee's own template.
+    if (winner is null)
+    {
+        Console.WriteLine("=== multipart/form-data attempts (template as raw binary) ===\n");
+        byte[] raw;
+        try { raw = Convert.FromBase64String(data); }
+        catch { Console.WriteLine("fingerData is not valid base64; cannot try multipart."); raw = Array.Empty<byte>(); }
+
+        if (raw.Length > 0)
+        {
+            string jsonNoData = JsonSerializer.Serialize(new
+            {
+                FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerType }
+            });
+
+            var multipart = new (string Label, string JsonPart, string BinPart)[]
+            {
+                ("M1 FingerPrintCfg(json) + FingerPrintData(bin)",    "FingerPrintCfg",     "FingerPrintData"),
+                ("M2 FingerPrintCfg(json) + fingerData(bin)",         "FingerPrintCfg",     "fingerData"),
+                ("M3 FingerPrintDataInfo(json) + FingerPrintData(bin)","FingerPrintDataInfo","FingerPrintData"),
+            };
+
+            foreach (var (label, jsonPart, binPart) in multipart)
+            {
+                using var mp = new MultipartFormDataContent();
+                mp.Add(new StringContent(jsonNoData, Encoding.UTF8, "application/json"), jsonPart);
+                var bin = new ByteArrayContent(raw);
+                bin.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                mp.Add(bin, binPart);
+
+                using var req = new HttpRequestMessage(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintDownload?format=json") { Content = mp };
+                try
+                {
+                    using var resp = await http.SendAsync(req);
+                    string txt = await resp.Content.ReadAsStringAsync();
+                    bool ok = resp.IsSuccessStatusCode
+                        && !txt.Contains("badParameters") && !txt.Contains("ParametersLack")
+                        && !txt.Contains("illegal") && !txt.Contains("errorFinger");
+                    Console.WriteLine($"[{(ok ? "OK  " : "FAIL")}] {label}");
+                    Console.WriteLine($"        HTTP {(int)resp.StatusCode}: {(txt.Length > 300 ? txt[..300] + "…" : txt.Replace("\n", " ").Replace("\t", ""))}");
+                    if (ok && winner is null) winner = label;
+                }
+                catch (Exception ex) { Console.WriteLine($"[ERR ] {label}: {ex.Message}"); }
+                Console.WriteLine();
+            }
+        }
+    }
+
     Console.WriteLine(winner is null
-        ? "No payload shape was accepted. Send this whole output back for the next step."
+        ? "No payload shape was accepted (inline base64 or multipart). Send this whole output back."
         : $"WINNER: {winner}\nTell the maintainer this label so the sync payload can be locked to it.");
     return winner is null ? 1 : 0;
 }
