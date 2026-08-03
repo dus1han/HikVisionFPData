@@ -24,6 +24,13 @@ public sealed class FingerprintTemplate
     /// <summary>Finger index 1..10.</summary>
     public int FingerIndex { get; set; }
 
+    /// <summary>
+    /// Device fingerprint type — normalFP for an attendance finger; special values like dismissingFP
+    /// or coerceFP are alarm/duress fingers. Preserved so a synced print keeps its meaning; writing
+    /// the wrong type is rejected as badParameters.
+    /// </summary>
+    public string FingerType { get; set; } = "normalFP";
+
     /// <summary>Opaque template bytes, copied binary between compatible devices.</summary>
     public byte[] Template { get; set; } = Array.Empty<byte>();
 

@@ -246,8 +246,25 @@ public sealed class IsapiAccessDevice : IAccessDevice
             {
                 string data = Str(f, "fingerData");
                 if (string.IsNullOrEmpty(data)) continue;
+
+                // Only attendance fingers are synced. Special types (dismissingFP/coerceFP/… — alarm
+                // and duress fingers) are device-local security config; copying them to the partner is
+                // both wrong and rejected by the firmware as badParameters.
+                string fingerType = Str(f, "fingerType");
+                if (!string.IsNullOrEmpty(fingerType) && !string.Equals(fingerType, "normalFP", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogDebug("Skipping {Type} fingerprint for {Emp} (not an attendance finger).", fingerType, employeeNo);
+                    continue;
+                }
+
                 int id = f.TryGetProperty("fingerPrintID", out var fid) && fid.TryGetInt32(out var i) ? i : 1;
-                result.Add(new FingerprintTemplate { EmployeeNo = employeeNo, FingerIndex = id, Template = SafeBase64(data) });
+                result.Add(new FingerprintTemplate
+                {
+                    EmployeeNo = employeeNo,
+                    FingerIndex = id,
+                    FingerType = string.IsNullOrEmpty(fingerType) ? "normalFP" : fingerType,
+                    Template = SafeBase64(data),
+                });
             }
         return result;
     }
@@ -261,7 +278,7 @@ public sealed class IsapiAccessDevice : IAccessDevice
                 employeeNo = fingerprint.EmployeeNo,
                 enableCardReader = new[] { 1 },
                 fingerPrintID = fingerprint.FingerIndex,
-                fingerType = "normalFP",
+                fingerType = string.IsNullOrEmpty(fingerprint.FingerType) ? "normalFP" : fingerprint.FingerType,
                 fingerData = Convert.ToBase64String(fingerprint.Template),
             },
         };
