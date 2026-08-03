@@ -29,12 +29,6 @@ public static class DeviceServiceCollectionExtensions
                 : ActivatorUtilities.CreateInstance<HikvisionDeviceFactory>(sp);
         });
 
-        // Always-available SDK factory, keyed "sdk", so the sync can route fingerprint writes over the
-        // HCNetSDK while the primary transport stays ISAPI. Lazily constructed; the SDK DLLs load only
-        // when a connection is actually made (Sync:FingerprintTransport = "sdk").
-        services.AddKeyedSingleton<IAccessDeviceFactory>("sdk",
-            (sp, _) => ActivatorUtilities.CreateInstance<HikvisionDeviceFactory>(sp));
-
         return services;
     }
 }

@@ -48,6 +48,15 @@ public sealed class SyncState
     public string? LastError { get; set; }
 }
 
+/// <summary>Outcome of one fingerprint write attempted by the out-of-process SDK writer.</summary>
+public sealed class FingerprintWriteResult
+{
+    public string EmployeeNo { get; set; } = string.Empty;
+    public int FingerIndex { get; set; }
+    public bool Ok { get; set; }
+    public string? Error { get; set; }
+}
+
 /// <summary>A device's view of one enrolled user, snapshotted into device_enrollment each sync.</summary>
 public sealed class DeviceEnrollment
 {

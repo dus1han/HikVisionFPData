@@ -16,6 +16,12 @@ using Serilog;
 // builder reads configuration.
 Directory.SetCurrentDirectory(AppContext.BaseDirectory);
 
+// One-shot SDK fingerprint writer: `HikSync.Service.exe fp-sdk-apply <jobFile>`. The service spawns
+// itself in this mode so the native HCNetSDK runs in a throwaway child — a crash there cannot take
+// down the service. Handled before the host is built; it never starts the workers.
+if (args.Length == 2 && args[0] == HikSync.Service.SdkFingerprintApply.Verb)
+    return await HikSync.Service.SdkFingerprintApply.RunAsync(args[1]);
+
 var builder = Host.CreateApplicationBuilder(args);
 
 // Run as a Windows Service (also runs fine as a console app for local debugging).
@@ -41,6 +47,9 @@ builder.Services.AddHikSyncData();
 builder.Services.AddHikSyncDevices();
 builder.Services.AddHikSyncPush();
 
+// Out-of-process SDK fingerprint writer (spawns this exe in fp-sdk-apply mode).
+builder.Services.AddSingleton<HikSync.Core.Abstractions.ISdkFingerprintWriter, HikSync.Service.OutOfProcessSdkFingerprintWriter>();
+
 builder.Services.AddSingleton<HealthState>();
 builder.Services.AddSingleton<OperationLogger>();
 builder.Services.AddSingleton<AttendanceCollector>();
@@ -65,3 +74,4 @@ using (var scope = host.Services.CreateScope())
 }
 
 host.Run();
+return 0;

@@ -52,6 +52,17 @@ public interface IDeviceEnrollmentRepository
     Task ReplaceForDeviceAsync(string deviceIp, IReadOnlyCollection<DeviceEnrollment> rows, CancellationToken ct);
 }
 
+/// <summary>
+/// Writes fingerprint templates to a device over the HCNetSDK. The SDK is native code that can
+/// hard-crash its host process, so the implementation runs it OUT OF PROCESS — a crash kills only the
+/// child, never the service. Returns one result per print (crash/timeout ⇒ all failed).
+/// </summary>
+public interface ISdkFingerprintWriter
+{
+    Task<IReadOnlyList<FingerprintWriteResult>> WriteAsync(
+        DeviceEndpoint target, IReadOnlyList<FingerprintTemplate> prints, CancellationToken ct);
+}
+
 public interface IOperationLogRepository
 {
     Task WriteAsync(OperationLog entry, CancellationToken ct);
