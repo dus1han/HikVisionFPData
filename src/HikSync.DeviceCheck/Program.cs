@@ -408,20 +408,37 @@ static async Task<int> RunFpSelfTest(string ip, int port, string user, string pa
     string data = fp.TryGetProperty("fingerData", out var fd) ? fd.GetString() ?? "" : "";
     Console.WriteLine($"read OK: fingerPrintID={fingerId}, fingerType={fingerType}, fingerData={data.Length} chars\n");
 
-    // 2. Candidate write payloads, most-likely first. Each writes the same template back to <emp>.
+    // Round 1 proved the structure is FingerPrintCfg + enableCardReader + fingerPrintID + fingerType +
+    // fingerData (the others lacked a required field). What remains is one bad VALUE — most likely
+    // enableCardReader. These keep that structure and vary a single value, writing the employee's own
+    // template back to their own slot (non-destructive).
+    int empNum = int.TryParse(emp, out var en) ? en : 0;
     var candidates = new (string Label, object Body)[]
     {
-        ("A  FingerPrintCfg + enableCardReader[1] + fingerType (current code)",
+        ("A1 enableCardReader [1] (baseline)",
             new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
-        ("B  FingerPrintDownload root + enableCardReader[1] + fingerType",
-            new { FingerPrintDownload = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
-        ("C  FingerPrintCfg + cardReaderNo:1 (single, like the read)",
-            new { FingerPrintCfg = new { employeeNo = emp, cardReaderNo = 1, fingerPrintID = fingerId, fingerType, fingerData = data } }),
-        ("D  FingerPrintCfg + enableCardReader[1], no fingerType",
-            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerData = data } }),
-        ("E  FingerPrintCfg + enableCardReader[1] + fingerNo (not fingerPrintID)",
-            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerNo = fingerId, fingerType, fingerData = data } }),
+        ("A2 enableCardReader [0]",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 0 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("A3 enableCardReader [1,1]",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1, 1 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("A4 enableCardReader [] (empty)",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = Array.Empty<int>(), fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("A5 employeeNo as number",
+            new { FingerPrintCfg = new { employeeNo = empNum, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("A6 fingerPrintID as string",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId.ToString(), fingerType, fingerData = data } }),
+        ("A7 add cardReaderNo:1 alongside",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, cardReaderNo = 1, fingerPrintID = fingerId, fingerType, fingerData = data } }),
     };
+
+    // Report the device's actual card readers — enableCardReader is expected to match them.
+    try
+    {
+        using var capResp = await http.GetAsync("/ISAPI/AccessControl/CardReaderCfg/capabilities?format=json");
+        string capTxt = await capResp.Content.ReadAsStringAsync();
+        Console.WriteLine($"CardReaderCfg capabilities (HTTP {(int)capResp.StatusCode}): {(capTxt.Length > 400 ? capTxt[..400] + "…" : capTxt.Replace("\n", " ").Replace("\t", ""))}\n");
+    }
+    catch { /* informational only */ }
 
     string? winner = null;
     foreach (var (label, body) in candidates)
