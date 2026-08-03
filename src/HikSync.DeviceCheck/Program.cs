@@ -4,6 +4,7 @@ using HikSync.Core.Logic;
 using HikSync.Core.Models;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using HikSync.Device.Fake;
 using HikSync.Device.Hikvision;
 using HikSync.Device.Isapi;
@@ -45,6 +46,8 @@ if (flags.Contains("help") || (args.Length == 0))
           --test-emp <no>    employee/card no for --write-test (default 999001)
           --fake             use the in-memory fake device (self-test, no hardware)
           --probe <emp>      dump raw ISAPI responses (capabilities + fingerprint) for an employee
+          --fp-selftest <emp>  find the FingerPrintDownload payload this firmware accepts (writes the
+                               employee's own fingerprint back unchanged — safe in production)
           --delete <emp[,emp]>    DELETE the given user(s); use "all" to delete everyone
           --delete-others <emp>   DELETE every user on the device except <emp>
           --sync-to <ip>     copy users + fingerprints from --ip to this target device
@@ -78,6 +81,14 @@ if (opts.TryGetValue("probe", out var probeEmp))
 {
     await RunProbe(ip, GetInt("isapi-port", 80), Get("user", "admin"), Get("pass", ""), probeEmp);
     return 0;
+}
+
+// Diagnostic: --fp-selftest <employeeNo> reads that employee's fingerprint and writes it BACK to the
+// SAME employee (no data change) trying several FingerPrintDownload payload shapes, to discover which
+// one this firmware accepts. Safe to run in production — it re-writes a person's own template.
+if (opts.TryGetValue("fp-selftest", out var fpEmp))
+{
+    return await RunFpSelfTest(ip, GetInt("isapi-port", 80), Get("user", "admin"), Get("pass", ""), fpEmp);
 }
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning));
@@ -363,4 +374,76 @@ static async Task RunProbe(string ip, int port, string user, string pass, string
     await Hit("UserInfo capabilities", HttpMethod.Get, "/ISAPI/AccessControl/UserInfo/capabilities?format=json", null);
     await Hit("FingerPrint write capabilities", HttpMethod.Get, "/ISAPI/AccessControl/FingerPrintDownload/capabilities?format=json", null);
     await Hit("Face lib capabilities", HttpMethod.Get, "/ISAPI/Intelligent/FDLib/capabilities?format=json", null);
+}
+
+// Reads <emp>'s own fingerprint and writes it straight back under several payload shapes, to find the
+// one this firmware accepts. Non-destructive: the data written is the employee's existing template.
+static async Task<int> RunFpSelfTest(string ip, int port, string user, string pass, string emp)
+{
+    using var handler = new HttpClientHandler { Credentials = new NetworkCredential(user, pass) };
+    using var http = new HttpClient(handler) { BaseAddress = new Uri($"http://{ip}:{port}/"), Timeout = TimeSpan.FromSeconds(15) };
+    Console.WriteLine($"FP SELF-TEST {ip}:{port}  employee={emp}");
+    Console.WriteLine("Reads this employee's own fingerprint and writes it back unchanged, trying each payload shape.\n");
+
+    // 1. Read the employee's current fingerprint.
+    string readBody = $"{{\"FingerPrintCond\":{{\"searchID\":\"1\",\"employeeNo\":\"{emp}\",\"cardReaderNo\":1}}}}";
+    using var readReq = new HttpRequestMessage(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintUpload?format=json")
+    { Content = new StringContent(readBody, Encoding.UTF8, "application/json") };
+    using var readResp = await http.SendAsync(readReq);
+    string readTxt = await readResp.Content.ReadAsStringAsync();
+    if (!readResp.IsSuccessStatusCode) { Console.WriteLine($"read failed HTTP {(int)readResp.StatusCode}: {readTxt}"); return 1; }
+
+    JsonElement fp;
+    try
+    {
+        using var doc = JsonDocument.Parse(readTxt);
+        var list = doc.RootElement.GetProperty("FingerPrintInfo").GetProperty("FingerPrintList");
+        if (list.GetArrayLength() == 0) { Console.WriteLine($"employee {emp} has no fingerprint to test with."); return 1; }
+        fp = list[0].Clone();
+    }
+    catch (Exception ex) { Console.WriteLine("could not parse fingerprint: " + ex.Message); return 1; }
+
+    int fingerId = fp.TryGetProperty("fingerPrintID", out var fid) && fid.TryGetInt32(out var i) ? i : 1;
+    string fingerType = fp.TryGetProperty("fingerType", out var ft) ? ft.GetString() ?? "normalFP" : "normalFP";
+    string data = fp.TryGetProperty("fingerData", out var fd) ? fd.GetString() ?? "" : "";
+    Console.WriteLine($"read OK: fingerPrintID={fingerId}, fingerType={fingerType}, fingerData={data.Length} chars\n");
+
+    // 2. Candidate write payloads, most-likely first. Each writes the same template back to <emp>.
+    var candidates = new (string Label, object Body)[]
+    {
+        ("A  FingerPrintCfg + enableCardReader[1] + fingerType (current code)",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("B  FingerPrintDownload root + enableCardReader[1] + fingerType",
+            new { FingerPrintDownload = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("C  FingerPrintCfg + cardReaderNo:1 (single, like the read)",
+            new { FingerPrintCfg = new { employeeNo = emp, cardReaderNo = 1, fingerPrintID = fingerId, fingerType, fingerData = data } }),
+        ("D  FingerPrintCfg + enableCardReader[1], no fingerType",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerPrintID = fingerId, fingerData = data } }),
+        ("E  FingerPrintCfg + enableCardReader[1] + fingerNo (not fingerPrintID)",
+            new { FingerPrintCfg = new { employeeNo = emp, enableCardReader = new[] { 1 }, fingerNo = fingerId, fingerType, fingerData = data } }),
+    };
+
+    string? winner = null;
+    foreach (var (label, body) in candidates)
+    {
+        string json = JsonSerializer.Serialize(body);
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintDownload?format=json")
+        { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        try
+        {
+            using var resp = await http.SendAsync(req);
+            string txt = await resp.Content.ReadAsStringAsync();
+            bool ok = resp.IsSuccessStatusCode && !txt.Contains("badParameters") && !txt.Contains("\"statusCode\":\t6");
+            Console.WriteLine($"[{(ok ? "OK  " : "FAIL")}] {label}");
+            Console.WriteLine($"        HTTP {(int)resp.StatusCode}: {(txt.Length > 300 ? txt[..300] + "…" : txt.Replace("\n", " ").Replace("\t", ""))}");
+            if (ok && winner is null) winner = label;
+        }
+        catch (Exception ex) { Console.WriteLine($"[ERR ] {label}: {ex.Message}"); }
+        Console.WriteLine();
+    }
+
+    Console.WriteLine(winner is null
+        ? "No payload shape was accepted. Send this whole output back for the next step."
+        : $"WINNER: {winner}\nTell the maintainer this label so the sync payload can be locked to it.");
+    return winner is null ? 1 : 0;
 }
