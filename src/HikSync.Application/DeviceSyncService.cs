@@ -3,6 +3,7 @@ using HikSync.Core.Abstractions;
 using HikSync.Core.Configuration;
 using HikSync.Core.Logic;
 using HikSync.Core.Models;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -18,10 +19,15 @@ public sealed class DeviceSyncService
     private readonly ISyncFailureRepository _syncFailures;
     private readonly IDeviceEnrollmentRepository _enrollment;
     private readonly IAccessDeviceFactory _factory;
+    private readonly IAccessDeviceFactory _sdkFactory;
     private readonly OperationLogger _log;
     private readonly SyncOptions _options;
     private readonly HealthState _health;
     private readonly ILogger<DeviceSyncService> _logger;
+
+    /// <summary>True when fingerprint writes should go over the HCNetSDK rather than the primary transport.</summary>
+    private bool UseSdkForFingerprints =>
+        string.Equals(_options.FingerprintTransport, "sdk", StringComparison.OrdinalIgnoreCase);
 
     public DeviceSyncService(
         IDevicePairRepository pairs,
@@ -29,6 +35,7 @@ public sealed class DeviceSyncService
         ISyncFailureRepository syncFailures,
         IDeviceEnrollmentRepository enrollment,
         IAccessDeviceFactory factory,
+        [FromKeyedServices("sdk")] IAccessDeviceFactory sdkFactory,
         OperationLogger log,
         IOptions<SyncOptions> options,
         HealthState health,
@@ -39,6 +46,7 @@ public sealed class DeviceSyncService
         _syncFailures = syncFailures;
         _enrollment = enrollment;
         _factory = factory;
+        _sdkFactory = sdkFactory;
         _log = log;
         _options = options.Value;
         _health = health;
@@ -78,9 +86,18 @@ public sealed class DeviceSyncService
 
         var inDevice = await ConnectLoggedAsync(pair.In.Ip, DeviceRole.In, pair, ct);
         IAccessDevice? outDevice = null;
+        IAccessDevice? inSdk = null, outSdk = null;
         try
         {
             outDevice = await ConnectLoggedAsync(pair.Out.Ip, DeviceRole.Out, pair, ct);
+
+            // Separate SDK connections used only for fingerprint writes when configured (the primary
+            // ISAPI transport reads and does everything else). Failure here is non-fatal.
+            if (UseSdkForFingerprints && _options.SyncFingerprints)
+            {
+                outSdk = await ConnectSdkAsync(pair.Out, ct);
+                inSdk = await ConnectSdkAsync(pair.In, ct);
+            }
 
             var inInfo = await inDevice.GetDeviceInfoAsync(ct);
             var outInfo = await outDevice.GetDeviceInfoAsync(ct);
@@ -115,8 +132,8 @@ public sealed class DeviceSyncService
                 var toOut = SyncPlanner.BuildMissingOnly(inUsers, inFps, outUsers, outFps);
                 var toIn = SyncPlanner.BuildMissingOnly(outUsers, outFps, inUsers, inFps);
 
-                fails.AddRange(await ApplyAsync(outDevice, pair.Id, pair.In.Ip, pair.Out.Ip, toOut, ct));
-                fails.AddRange(await ApplyAsync(inDevice, pair.Id, pair.Out.Ip, pair.In.Ip, toIn, ct));
+                fails.AddRange(await ApplyAsync(outDevice, outSdk ?? outDevice, pair.Id, pair.In.Ip, pair.Out.Ip, toOut, ct));
+                fails.AddRange(await ApplyAsync(inDevice, inSdk ?? inDevice, pair.Id, pair.Out.Ip, pair.In.Ip, toIn, ct));
 
                 summary = $"union: -> OUT users +{toOut.UsersToUpsert.Count}, fp +{toOut.FingerprintsToUpsert.Count}; " +
                           $"-> IN users +{toIn.UsersToUpsert.Count}, fp +{toIn.FingerprintsToUpsert.Count} " +
@@ -127,7 +144,7 @@ public sealed class DeviceSyncService
             {
                 // Legacy one-way: IN is master, OUT mirrors it.
                 var plan = SyncPlanner.Build(inUsers, inFps, outUsers, outFps, _options.DeleteRemovedUsers);
-                fails.AddRange(await ApplyAsync(outDevice, pair.Id, pair.In.Ip, pair.Out.Ip, plan, ct));
+                fails.AddRange(await ApplyAsync(outDevice, outSdk ?? outDevice, pair.Id, pair.In.Ip, pair.Out.Ip, plan, ct));
                 summary = $"one-way IN->OUT: users +{plan.UsersToUpsert.Count}, fingerprints +{plan.FingerprintsToUpsert.Count}, " +
                           $"deletes {plan.EmployeesToDelete.Count} (IN {inUsers.Count} users / OUT {outUsers.Count} users)" +
                           (fails.Count > 0 ? $" [{fails.Count} item(s) failed]" : "");
@@ -151,9 +168,36 @@ public sealed class DeviceSyncService
         }
         finally
         {
+            if (outSdk is not null) await SafeDisposeAsync(outSdk);
+            if (inSdk is not null) await SafeDisposeAsync(inSdk);
             if (outDevice is not null) await DisconnectLoggedAsync(outDevice, pair.Out.Ip, DeviceRole.Out, pair, ct);
             await DisconnectLoggedAsync(inDevice, pair.In.Ip, DeviceRole.In, pair, ct);
         }
+    }
+
+    /// <summary>Opens an SDK connection to a device (same IP/creds, SDK port) for fingerprint writes. Null on failure.</summary>
+    private async Task<IAccessDevice?> ConnectSdkAsync(DeviceEndpoint primary, CancellationToken ct)
+    {
+        var sdkEndpoint = new DeviceEndpoint
+        {
+            Ip = primary.Ip,
+            Port = _options.SdkPort,
+            Username = primary.Username,
+            Password = primary.Password,
+        };
+        try { return await _sdkFactory.ConnectAsync(sdkEndpoint, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "SDK connect for fingerprint write failed on {Ip}:{Port}; fingerprints skipped this cycle.",
+                sdkEndpoint.Ip, sdkEndpoint.Port);
+            return null;
+        }
+    }
+
+    private async Task SafeDisposeAsync(IAccessDevice device)
+    {
+        try { await device.DisposeAsync(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "SDK fingerprint device dispose failed."); }
     }
 
     private async Task<IAccessDevice> ConnectLoggedAsync(string ip, DeviceRole role, DevicePair pair, CancellationToken ct)
@@ -189,7 +233,7 @@ public sealed class DeviceSyncService
     /// Cancellation is not swallowed: it propagates so shutdown still stops the loop promptly.
     /// </summary>
     private async Task<List<SyncFailure>> ApplyAsync(
-        IAccessDevice target, long pairId, string sourceIp, string targetIp, SyncPlan plan, CancellationToken ct)
+        IAccessDevice target, IAccessDevice fingerprintTarget, long pairId, string sourceIp, string targetIp, SyncPlan plan, CancellationToken ct)
     {
         var failures = new List<SyncFailure>();
 
@@ -203,10 +247,12 @@ public sealed class DeviceSyncService
             }
         }
 
+        // Fingerprints go to fingerprintTarget — the SDK connection when configured, otherwise the same
+        // ISAPI device. Users must be upserted first (above): the fingerprint write references the user.
         if (_options.SyncFingerprints)
             foreach (var fp in plan.FingerprintsToUpsert)
             {
-                try { await target.UpsertFingerprintAsync(fp, ct); }
+                try { await fingerprintTarget.UpsertFingerprintAsync(fp, ct); }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(ex, "Sync: could not upsert fingerprint for {EmployeeNo} (finger {Finger}) on {Ip}; skipping.",

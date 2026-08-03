@@ -90,12 +90,22 @@ public sealed class SyncOptions
     public bool OnlyUsersWithFingerprints { get; set; } = true;
 
     /// <summary>
-    /// Whether to push fingerprint templates between devices. Some firmware (e.g. DS-K1A8503MF-B
-    /// V1.4.1) rejects FingerPrintDownload for its own templates, so template transfer is impossible
-    /// over ISAPI — set false there to stop the futile every-cycle retries while user/card sync
-    /// continues. Fingerprints must then be enrolled on each reader directly.
+    /// Whether to push fingerprint templates between devices. Set false to skip fingerprint transfer
+    /// entirely (user/card sync continues) — e.g. if neither ISAPI nor SDK write works on the hardware.
     /// </summary>
     public bool SyncFingerprints { get; set; } = true;
+
+    /// <summary>
+    /// Transport for writing fingerprint templates: "isapi" or "sdk". ISAPI FingerPrintDownload is
+    /// rejected by some firmware (e.g. DS-K1A8503MF-B V1.4.1) for its own templates; the HCNetSDK
+    /// NET_DVR_SET_FINGERPRINT path works there (verified round-trip). Reads and everything else stay
+    /// on the primary transport regardless — only the fingerprint WRITE switches. "sdk" needs the
+    /// native HCNetSDK DLLs present and the SDK port reachable.
+    /// </summary>
+    public string FingerprintTransport { get; set; } = "isapi";
+
+    /// <summary>SDK service port used when <see cref="FingerprintTransport"/> is "sdk".</summary>
+    public int SdkPort { get; set; } = 8000;
 }
 
 /// <summary>Operation-log retention. A nightly job deletes rows older than <see cref="RetentionDays"/>.</summary>
