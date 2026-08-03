@@ -103,20 +103,22 @@ public sealed class DeviceSyncService
                 var toOut = SyncPlanner.BuildMissingOnly(inUsers, inFps, outUsers, outFps);
                 var toIn = SyncPlanner.BuildMissingOnly(outUsers, outFps, inUsers, inFps);
 
-                await ApplyAsync(outDevice, toOut, ct);
-                await ApplyAsync(inDevice, toIn, ct);
+                int outFail = await ApplyAsync(outDevice, pair.Out.Ip, toOut, ct);
+                int inFail = await ApplyAsync(inDevice, pair.In.Ip, toIn, ct);
 
                 summary = $"union: -> OUT users +{toOut.UsersToUpsert.Count}, fp +{toOut.FingerprintsToUpsert.Count}; " +
                           $"-> IN users +{toIn.UsersToUpsert.Count}, fp +{toIn.FingerprintsToUpsert.Count} " +
-                          $"(IN {inUsers.Count} users/{inFps.Count} fp, OUT {outUsers.Count} users/{outFps.Count} fp)";
+                          $"(IN {inUsers.Count} users/{inFps.Count} fp, OUT {outUsers.Count} users/{outFps.Count} fp)" +
+                          (outFail + inFail > 0 ? $" [{outFail + inFail} item(s) failed]" : "");
             }
             else
             {
                 // Legacy one-way: IN is master, OUT mirrors it.
                 var plan = SyncPlanner.Build(inUsers, inFps, outUsers, outFps, _options.DeleteRemovedUsers);
-                await ApplyAsync(outDevice, plan, ct);
+                int fail = await ApplyAsync(outDevice, pair.Out.Ip, plan, ct);
                 summary = $"one-way IN->OUT: users +{plan.UsersToUpsert.Count}, fingerprints +{plan.FingerprintsToUpsert.Count}, " +
-                          $"deletes {plan.EmployeesToDelete.Count} (IN {inUsers.Count} users / OUT {outUsers.Count} users)";
+                          $"deletes {plan.EmployeesToDelete.Count} (IN {inUsers.Count} users / OUT {outUsers.Count} users)" +
+                          (fail > 0 ? $" [{fail} item(s) failed]" : "");
             }
 
             await _syncState.UpsertAsync(new SyncState
@@ -163,14 +165,50 @@ public sealed class DeviceSyncService
     }
 
     /// <summary>Applies a plan to one device: users first (a fingerprint references its user), then fingerprints, then deletes.</summary>
-    private static async Task ApplyAsync(IAccessDevice target, SyncPlan plan, CancellationToken ct)
+    /// <summary>
+    /// Applies a plan to one device. Each item is attempted independently: a single device rejection
+    /// (e.g. one malformed fingerprint the firmware refuses with a 400) is logged and skipped so it
+    /// cannot abort the whole batch. Previously the first failure stopped every later upsert, which
+    /// meant one bad fingerprint left every employee behind it unsynced — so they could punch on the
+    /// device they were enrolled on but not on its partner. Returns the number of failed items.
+    /// Cancellation is not swallowed: it propagates so shutdown still stops the loop promptly.
+    /// </summary>
+    private async Task<int> ApplyAsync(IAccessDevice target, string targetIp, SyncPlan plan, CancellationToken ct)
     {
+        int failures = 0;
+
         foreach (var user in plan.UsersToUpsert)
-            await target.UpsertUserAsync(user, ct);
+        {
+            try { await target.UpsertUserAsync(user, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures++;
+                _logger.LogWarning(ex, "Sync: could not upsert user {EmployeeNo} on {Ip}; skipping.", user.EmployeeNo, targetIp);
+            }
+        }
+
         foreach (var fp in plan.FingerprintsToUpsert)
-            await target.UpsertFingerprintAsync(fp, ct);
+        {
+            try { await target.UpsertFingerprintAsync(fp, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures++;
+                _logger.LogWarning(ex, "Sync: could not upsert fingerprint for {EmployeeNo} (finger {Finger}) on {Ip}; skipping.",
+                    fp.EmployeeNo, fp.FingerIndex, targetIp);
+            }
+        }
+
         foreach (var employeeNo in plan.EmployeesToDelete)
-            await target.DeleteUserAsync(employeeNo, ct);
+        {
+            try { await target.DeleteUserAsync(employeeNo, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures++;
+                _logger.LogWarning(ex, "Sync: could not delete user {EmployeeNo} on {Ip}; skipping.", employeeNo, targetIp);
+            }
+        }
+
+        return failures;
     }
 
     private static async Task<List<T>> ReadAllAsync<T>(IAsyncEnumerable<T> source)
