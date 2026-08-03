@@ -361,7 +361,19 @@ public sealed class HikvisionAccessDevice : IAccessDevice
             Array.Copy(fp.Template, rec.byFingerData, len);
             rec.dwFingerPrintLen = (uint)len;
 
-            SendOne(handle, rec, rec.dwSize, Marshal.SizeOf<NET_DVR_FINGERPRINT_STATUS>(), $"SET_FINGERPRINT({fp.EmployeeNo}/{fp.FingerIndex})");
+            SendOne(handle, rec, rec.dwSize, Marshal.SizeOf<NET_DVR_FINGERPRINT_STATUS>(), $"SET_FINGERPRINT({fp.EmployeeNo}/{fp.FingerIndex})",
+                statusPtr =>
+                {
+                    // The device's real verdict is in the per-record status struct — SUCCESS from the
+                    // send call only means "message received". byRecvStatus 1 = stored, else rejected.
+                    var st = Marshal.PtrToStructure<NET_DVR_FINGERPRINT_STATUS>(statusPtr);
+                    if (st.byRecvStatus != 1)
+                    {
+                        string err = System.Text.Encoding.ASCII.GetString(st.byErrorMsg ?? Array.Empty<byte>()).TrimEnd('\0', ' ');
+                        throw new HcNetSdkException(
+                            $"SET_FINGERPRINT({fp.EmployeeNo}/{fp.FingerIndex}): device rejected (recvStatus={st.byRecvStatus}, readerStatus={st.byCardReaderRecvStatus}, msg='{err}')", 0);
+                    }
+                });
         }
         finally { NET_DVR_StopRemoteConfig(handle); }
     }
@@ -381,8 +393,10 @@ public sealed class HikvisionAccessDevice : IAccessDevice
         finally { Marshal.FreeHGlobal(ptr); }
     }
 
-    // Sends one record via SendWithRecvRemoteConfig and drives the status loop until FINISH.
-    private static void SendOne<T>(int handle, T record, uint inSize, int outSize, string op) where T : struct
+    // Sends one record via SendWithRecvRemoteConfig. onStatus (if given) inspects the returned
+    // per-record status struct — the device's real accept/reject verdict, which the return code alone
+    // does not convey.
+    private static void SendOne<T>(int handle, T record, uint inSize, int outSize, string op, Action<IntPtr>? onStatus = null) where T : struct
     {
         IntPtr inPtr = Marshal.AllocHGlobal((int)inSize);
         IntPtr outPtr = Marshal.AllocHGlobal(outSize);
@@ -397,7 +411,8 @@ public sealed class HikvisionAccessDevice : IAccessDevice
                 {
                     case SEND_STATUS_SUCCESS:
                     case SEND_STATUS_FINISH:
-                        return; // record accepted / committed
+                        onStatus?.Invoke(outPtr); // throws if the device rejected the record
+                        return;
                     case SEND_STATUS_NEEDWAIT: Thread.Sleep(20); break;
                     default: throw new HcNetSdkException($"NET_DVR_SendWithRecvRemoteConfig({op}) status {status}", NET_DVR_GetLastError());
                 }
