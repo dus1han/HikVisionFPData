@@ -390,19 +390,22 @@ public sealed class HikvisionAccessDevice : IAccessDevice
         {
             Marshal.StructureToPtr(record, inPtr, false);
             uint returned = 0;
-            for (int guard = 0; guard < 32; guard++)
+            bool recordSent = false;
+            for (int guard = 0; guard < 64; guard++)
             {
-                int status = NET_DVR_SendWithRecvRemoteConfig(handle, inPtr, inSize, outPtr, (uint)outSize, ref returned);
+                // Send the record once (SUCCESS = accepted into the session). Then send an EMPTY buffer
+                // to drive the session to FINISH, which is what actually commits the write. Returning on
+                // the first SUCCESS left the transaction uncommitted, so StopRemoteConfig discarded it —
+                // the device reported success but stored nothing.
+                IntPtr buf = recordSent ? IntPtr.Zero : inPtr;
+                uint bufLen = recordSent ? 0u : inSize;
+                int status = NET_DVR_SendWithRecvRemoteConfig(handle, buf, bufLen, outPtr, (uint)outSize, ref returned);
                 switch (status)
                 {
-                    // For a single-record set, SUCCESS is the terminal state — the device accepted the
-                    // record. Re-sending the same record just re-accepts it and never yields FINISH,
-                    // which is why this used to spin to the guard limit and throw with error 0.
-                    case SEND_STATUS_SUCCESS:
-                    case SEND_STATUS_FINISH:
-                        return;
+                    case SEND_STATUS_SUCCESS: recordSent = true; break; // accepted; next call sends the finish signal
+                    case SEND_STATUS_FINISH: return;                    // committed
                     case SEND_STATUS_NEEDWAIT: Thread.Sleep(20); break;
-                    default: throw new HcNetSdkException($"NET_DVR_SendWithRecvRemoteConfig({op})", NET_DVR_GetLastError());
+                    default: throw new HcNetSdkException($"NET_DVR_SendWithRecvRemoteConfig({op}) status {status}", NET_DVR_GetLastError());
                 }
             }
             throw new HcNetSdkException($"NET_DVR_SendWithRecvRemoteConfig({op}) did not finish", NET_DVR_GetLastError());

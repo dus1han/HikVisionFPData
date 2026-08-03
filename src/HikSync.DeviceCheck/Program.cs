@@ -393,54 +393,61 @@ static async Task<int> RunFpSdkWriteback(
     Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
     ILoggerFactory lf, DeviceEndpoint endpoint, string emp, CancellationToken ct)
 {
-    Console.WriteLine($"\nFP SDK WRITEBACK  employee={emp}");
-    Console.WriteLine("Read via ISAPI, write back via HCNetSDK NET_DVR_SET_FINGERPRINT.\n");
+    Console.WriteLine($"\nFP SDK PERSIST TEST  employee={emp}");
+    Console.WriteLine("Reads the employee's fingerprint, writes it to a FREE finger slot via the SDK, then");
+    Console.WriteLine("re-reads to prove the slot actually gained a print (real persistence, not an overwrite).\n");
 
-    // 1. Read the template over ISAPI (proven to work).
-    FingerprintTemplate? fp = null;
+    // 1. Read the employee's current fingerprints over ISAPI (which slots are used).
+    var current = new List<FingerprintTemplate>();
     try
     {
         var isapiFactory = new HikSync.Device.Isapi.IsapiAccessDeviceFactory(sdkOptions, lf);
         await using var readDev = await isapiFactory.ConnectAsync(endpoint, ct);
         await foreach (var f in readDev.ReadFingerprintsAsync(ct))
-            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal)) { fp = f; break; }
+            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal)) current.Add(f);
     }
     catch (Exception ex) { Console.WriteLine("[FAIL] ISAPI read failed: " + ex.Message); return 1; }
 
-    if (fp is null) { Console.WriteLine($"no fingerprint read for employee {emp} via ISAPI."); return 1; }
-    Console.WriteLine($"ISAPI read OK: finger {fp.FingerIndex}, {fp.Template.Length} bytes.\n");
+    if (current.Count == 0) { Console.WriteLine($"employee {emp} has no fingerprint to copy from."); return 1; }
 
-    // 2. Write it back via the SDK (port 8000).
+    var used = current.Select(f => f.FingerIndex).ToHashSet();
+    int freeSlot = Enumerable.Range(1, 10).FirstOrDefault(i => !used.Contains(i));
+    if (freeSlot == 0) { Console.WriteLine("all 10 finger slots are in use; cannot test a fresh add."); return 1; }
+
+    var source = current[0];
+    Console.WriteLine($"ISAPI read OK: {current.Count} print(s), slots [{string.Join(",", used.OrderBy(x => x))}]. Will write to FREE slot {freeSlot}.\n");
+
+    // 2. Write the template to the FREE slot via the SDK — a genuine new record, like the sync does.
     try
     {
         var sdkMgr = new HcNetSdkManager(sdkOptions, lf.CreateLogger<HcNetSdkManager>());
         var sdkFactory = new HikvisionDeviceFactory(sdkMgr, lf);
         await using var sdkDev = await sdkFactory.ConnectAsync(endpoint, ct);
-        await sdkDev.UpsertFingerprintAsync(fp, ct);
-        Console.WriteLine("[ OK ] SDK NET_DVR_SET_FINGERPRINT accepted the template.\n");
+        await sdkDev.UpsertFingerprintAsync(new FingerprintTemplate
+        {
+            EmployeeNo = emp, FingerIndex = freeSlot, FingerType = source.FingerType, Template = source.Template,
+        }, ct);
+        Console.WriteLine($"[ OK ] SDK NET_DVR_SET_FINGERPRINT returned success for slot {freeSlot}.\n");
     }
     catch (Exception ex) { Console.WriteLine("[FAIL] SDK write failed: " + ex.Message); return 1; }
 
-    // 3. Verify: read the fingerprint back over ISAPI and compare bytes. "Accepted" is not enough —
-    // the stored template must match what we sent, or it would be an unusable print that authenticates
-    // no one. Identical bytes prove the SDK faithfully stored the ISAPI-read template.
+    // 3. Re-read: did slot `freeSlot` actually appear? THIS is the real persistence check — a slot the
+    // employee did not have before must now exist.
     try
     {
         var verifyFactory = new HikSync.Device.Isapi.IsapiAccessDeviceFactory(sdkOptions, lf);
         await using var verifyDev = await verifyFactory.ConnectAsync(endpoint, ct);
-        FingerprintTemplate? after = null;
+        bool appeared = false;
         await foreach (var f in verifyDev.ReadFingerprintsAsync(ct))
-            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal) && f.FingerIndex == fp.FingerIndex) { after = f; break; }
+            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal) && f.FingerIndex == freeSlot) { appeared = true; break; }
 
-        if (after is null)
-            Console.WriteLine("[WARN] verify: fingerprint no longer reads back — the write may not have stored.");
-        else if (after.Template.AsSpan().SequenceEqual(fp.Template))
-            Console.WriteLine($"[ OK ] verify: read back {after.Template.Length} bytes, IDENTICAL. SDK fingerprint transfer works — sync can be routed over the SDK.");
+        if (appeared)
+            Console.WriteLine($"[ OK ] PERSISTED: slot {freeSlot} now exists on the device. SDK fingerprint writes really store — sync will work. (Delete this test finger via the device UI if you like.)");
         else
-            Console.WriteLine($"[WARN] verify: read back {after.Template.Length} bytes but DIFFERENT from what we wrote — the template format may not survive the round-trip.");
-        return 0;
+            Console.WriteLine($"[FAIL] NOT PERSISTED: slot {freeSlot} still absent after a 'successful' write. The SDK reports success but stores nothing — this is the sync's problem.");
+        return appeared ? 0 : 1;
     }
-    catch (Exception ex) { Console.WriteLine("[WARN] verify read failed: " + ex.Message); return 0; }
+    catch (Exception ex) { Console.WriteLine("[WARN] verify read failed: " + ex.Message); return 1; }
 }
 
 // Reads <emp>'s own fingerprint and writes it straight back under several payload shapes, to find the
