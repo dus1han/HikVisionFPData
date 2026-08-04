@@ -47,6 +47,13 @@ if (flags.Contains("help") || (args.Length == 0))
           --test-emp <no>    employee/card no for --write-test (default 999001)
           --fake             use the in-memory fake device (self-test, no hardware)
           --probe <emp>      dump raw ISAPI responses (capabilities + fingerprint) for an employee
+          --compare <ip>     read-only: what a two-way sync would transfer between two devices
+          --fp-inventory     every fingerprint record, incl. types the sync reader filters out
+          --push-fp <emp> --from <ip>   copy one fingerprint, print the device verdict, verify
+          --fp-dup-test [n]  prove the device refuses already-enrolled fingers (names the owner)
+          --fp-repair --from <ip> [--apply]  rebuild enrolments stored under a non-attendance type
+          --isapi <path> [--method M] [--body JSON]   raw authenticated ISAPI call
+          --only <emp,...>   restrict --sync-to to specific employees
           --fp-selftest <emp>  find the FingerPrintDownload payload this firmware accepts (writes the
                                employee's own fingerprint back unchanged — safe in production)
           --fp-sdk-writeback <emp>  read fingerprint via ISAPI, write it back via HCNetSDK (needs
@@ -137,6 +144,100 @@ if (opts.TryGetValue("fp-sdk-writeback", out var fpwEmp))
     return await RunFpSdkWriteback(sdkOptions, loggerFactory, endpoint, fpwEmp, ct);
 }
 
+// Diagnostic: --push-fp <emp> --from <ip> reads that employee's template from the source device,
+// applies it to --ip, prints the device's raw verdict, and re-reads to prove persistence.
+if (opts.TryGetValue("push-fp", out var pushEmp))
+{
+    var fromEp = new DeviceEndpoint
+    {
+        Ip = Get("from", ""), Port = port,
+        Username = Get("from-user", endpoint.Username), Password = Get("from-pass", endpoint.Password),
+    };
+    if (string.IsNullOrWhiteSpace(fromEp.Ip)) { Console.Error.WriteLine("--push-fp requires --from <ip>"); return 2; }
+    return await RunPushFp(sdkOptions, loggerFactory, fromEp, endpoint, pushEmp, Get("as-emp", pushEmp), ct);
+}
+
+// Maintenance: --fp-repair --from <ip> rebuilds enrolments stored under a non-attendance fingerprint
+// type. Dry run unless --apply is given.
+if (flags.Contains("fp-repair") || opts.ContainsKey("fp-repair"))
+{
+    var fromEp = new DeviceEndpoint
+    {
+        Ip = Get("from", ""), Port = port,
+        Username = Get("from-user", endpoint.Username), Password = Get("from-pass", endpoint.Password),
+    };
+    if (string.IsNullOrWhiteSpace(fromEp.Ip)) { Console.Error.WriteLine("--fp-repair requires --from <ip>"); return 2; }
+    return await RunFpRepair(sdkOptions, loggerFactory, fromEp, endpoint, flags.Contains("apply"), ct);
+}
+
+// Diagnostic: --isapi <path> [--method M] [--body JSON] — raw authenticated ISAPI call.
+if (opts.TryGetValue("isapi", out var rawPath))
+{
+    using var rawHandler = new HttpClientHandler { Credentials = new NetworkCredential(endpoint.Username, endpoint.Password) };
+    using var rawHttp = new HttpClient(rawHandler)
+    {
+        BaseAddress = new Uri($"http://{endpoint.Ip}:{sdkOptions.Value.IsapiPort}/"),
+        Timeout = TimeSpan.FromSeconds(20),
+    };
+    using var rawReq = new HttpRequestMessage(new HttpMethod(Get("method", opts.ContainsKey("body") ? "POST" : "GET")), rawPath);
+    if (opts.TryGetValue("body", out var rawBody))
+        rawReq.Content = new StringContent(rawBody, Encoding.UTF8, "application/json");
+    using var rawResp = await rawHttp.SendAsync(rawReq, ct);
+    Console.WriteLine($"HTTP {(int)rawResp.StatusCode}");
+    Console.WriteLine((await rawResp.Content.ReadAsStringAsync(ct)).Replace("\t", ""));
+    return rawResp.IsSuccessStatusCode ? 0 : 1;
+}
+
+// Diagnostic: --fp-inventory lists EVERY fingerprint record on the device, including the types the
+// sync reader deliberately skips. Read-only.
+if (flags.Contains("fp-inventory"))
+{
+    var invFactory = new IsapiAccessDeviceFactory(sdkOptions, loggerFactory);
+    await using var invDev = (IsapiAccessDevice)await invFactory.ConnectAsync(endpoint, ct);
+    var people = new List<string>();
+    await foreach (var u in invDev.ReadUsersAsync(ct)) people.Add(u.EmployeeNo);
+
+    var byType = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    int noFp = 0;
+    Console.WriteLine($"\nFINGERPRINT INVENTORY — {endpoint.Ip} ({people.Count} people)\n");
+    foreach (var p in people)
+    {
+        var raw = await invDev.ReadRawFingerprintsAsync(p, ct);
+        if (raw.Count == 0) { noFp++; continue; }
+        foreach (var r in raw)
+            byType[r.FingerType] = byType.GetValueOrDefault(r.FingerType) + 1;
+        Console.WriteLine($"  {p,-8} {string.Join(", ", raw.Select(r => $"slot {r.Slot}: {r.FingerType} ({r.Bytes}B)"))}");
+    }
+    Console.WriteLine($"\ntotals: {string.Join(", ", byType.Select(kv => $"{kv.Key}={kv.Value}"))}; people with no fingerprint = {noFp}");
+    return 0;
+}
+
+// Diagnostic: --fp-type-test <emp> --from <ip> — why a pushed normalFP can come back dismissingFP.
+if (opts.TryGetValue("fp-type-test", out var typeEmp))
+{
+    var fromEp = new DeviceEndpoint
+    {
+        Ip = Get("from", ""), Port = port,
+        Username = Get("from-user", endpoint.Username), Password = Get("from-pass", endpoint.Password),
+    };
+    if (string.IsNullOrWhiteSpace(fromEp.Ip)) { Console.Error.WriteLine("--fp-type-test requires --from <ip>"); return 2; }
+    return await RunFpTypeTest(sdkOptions, loggerFactory, fromEp, endpoint, typeEmp, Get("lab-emp", "999123"), ct);
+}
+
+// Diagnostic: --fp-dup-test writes several different employees' templates to one throwaway person to
+// show whether the device is refusing duplicate fingers. Only the throwaway user is written to.
+if (flags.Contains("fp-dup-test") || opts.ContainsKey("fp-dup-test"))
+{
+    return await RunFpDupTest(sdkOptions, loggerFactory, endpoint, Get("lab-emp", "999123"), GetInt("fp-dup-test", 4), ct);
+}
+
+// Diagnostic: --fp-sdk-lab <emp> sweeps the SET_FINGERPRINT parameters against a THROWAWAY employee
+// (created and deleted by the test) to find what the device actually accepts. Run with --transport sdk.
+if (opts.TryGetValue("fp-sdk-lab", out var labEmp))
+{
+    return await RunFpSdkLab(sdkOptions, loggerFactory, endpoint, labEmp, Get("lab-emp", "999123"), ct);
+}
+
 // Maintenance modes (run instead of the standard checks).
 if (opts.TryGetValue("delete", out var delSpec))
 {
@@ -148,10 +249,19 @@ if (opts.TryGetValue("delete-others", out var keepEmp))
     await DeleteOthers(factory, endpoint, keepEmp, ct);
     return 0;
 }
+if (opts.TryGetValue("compare", out var compareIp))
+{
+    var otherEp = new DeviceEndpoint { Ip = compareIp, Port = port, Username = Get("to-user", endpoint.Username), Password = Get("to-pass", endpoint.Password) };
+    await CompareDevices(factory, endpoint, otherEp, ct);
+    return 0;
+}
 if (opts.TryGetValue("sync-to", out var syncTargetIp))
 {
     var targetEp = new DeviceEndpoint { Ip = syncTargetIp, Port = port, Username = Get("to-user", endpoint.Username), Password = Get("to-pass", endpoint.Password) };
-    await SyncTo(factory, endpoint, targetEp, ct);
+    var only = opts.TryGetValue("only", out var onlySpec)
+        ? onlySpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.Ordinal)
+        : null;
+    await SyncTo(factory, endpoint, targetEp, only, ct);
     return 0;
 }
 
@@ -304,9 +414,50 @@ static async Task DeleteOthers(IAccessDeviceFactory factory, DeviceEndpoint ep, 
     await foreach (var u in dev.ReadUsersAsync(ct)) Console.WriteLine($"  employee_no={u.EmployeeNo}  name='{u.Name}'");
 }
 
-static async Task SyncTo(IAccessDeviceFactory factory, DeviceEndpoint src, DeviceEndpoint dst, CancellationToken ct)
+// READ-ONLY: reports what a two-way union sync would have to transfer between two devices.
+static async Task CompareDevices(IAccessDeviceFactory factory, DeviceEndpoint a, DeviceEndpoint b, CancellationToken ct)
 {
-    Console.WriteLine($"Sync {src.Ip} -> {dst.Ip} (user={dst.Username})\n");
+    async Task<(List<DeviceUser> Users, List<FingerprintTemplate> Fps)> Read(DeviceEndpoint ep)
+    {
+        await using var d = await factory.ConnectAsync(ep, ct);
+        var users = new List<DeviceUser>();
+        await foreach (var u in d.ReadUsersAsync(ct)) users.Add(u);
+        var fps = new List<FingerprintTemplate>();
+        await foreach (var f in d.ReadFingerprintsAsync(ct)) fps.Add(f);
+        return (users, fps);
+    }
+
+    var (usersA, fpsA) = await Read(a);
+    var (usersB, fpsB) = await Read(b);
+
+    var withA = fpsA.Select(f => f.EmployeeNo).ToHashSet(StringComparer.Ordinal);
+    var withB = fpsB.Select(f => f.EmployeeNo).ToHashSet(StringComparer.Ordinal);
+
+    Console.WriteLine($"\n{a.Ip}: {usersA.Count} users, {fpsA.Count} fingerprints across {withA.Count} people");
+    Console.WriteLine($"{b.Ip}: {usersB.Count} users, {fpsB.Count} fingerprints across {withB.Count} people\n");
+
+    var missingOnB = withA.Except(withB).OrderBy(x => x).ToList();
+    var missingOnA = withB.Except(withA).OrderBy(x => x).ToList();
+    Console.WriteLine($"fingerprints on {a.Ip} but not {b.Ip}: {missingOnB.Count}  [{string.Join(", ", missingOnB)}]");
+    Console.WriteLine($"fingerprints on {b.Ip} but not {a.Ip}: {missingOnA.Count}  [{string.Join(", ", missingOnA)}]");
+
+    Console.WriteLine($"\nusers with no fingerprint on {a.Ip}: [{string.Join(", ", usersA.Select(u => u.EmployeeNo).Where(e => !withA.Contains(e)))}]");
+    Console.WriteLine($"users with no fingerprint on {b.Ip}: [{string.Join(", ", usersB.Select(u => u.EmployeeNo).Where(e => !withB.Contains(e)))}]");
+
+    int same = 0, differ = 0;
+    foreach (var emp in withA.Intersect(withB))
+    {
+        var ta = fpsA.First(f => f.EmployeeNo == emp).Template;
+        var tb = fpsB.First(f => f.EmployeeNo == emp).Template;
+        if (ta.AsSpan().SequenceEqual(tb)) same++; else differ++;
+    }
+    Console.WriteLine($"\nshared people: {same} byte-identical template(s), {differ} differing (independently enrolled)");
+}
+
+static async Task SyncTo(IAccessDeviceFactory factory, DeviceEndpoint src, DeviceEndpoint dst, HashSet<string>? only, CancellationToken ct)
+{
+    Console.WriteLine($"Sync {src.Ip} -> {dst.Ip} (user={dst.Username})"
+        + (only is null ? "\n" : $"  [restricted to: {string.Join(", ", only)}]\n"));
     await using var s = await factory.ConnectAsync(src, ct);
     await using var d = await factory.ConnectAsync(dst, ct);
 
@@ -333,6 +484,18 @@ static async Task SyncTo(IAccessDeviceFactory factory, DeviceEndpoint src, Devic
 
     var toDst = SyncPlanner.BuildMissingOnly(srcUsers, srcFps, dstUsers, dstFps);
     var toSrc = SyncPlanner.BuildMissingOnly(dstUsers, dstFps, srcUsers, srcFps);
+
+    if (only is not null)
+    {
+        static void Restrict(SyncPlan p, HashSet<string> keep)
+        {
+            p.UsersToUpsert.RemoveAll(u => !keep.Contains(u.EmployeeNo));
+            p.FingerprintsToUpsert.RemoveAll(f => !keep.Contains(f.EmployeeNo));
+            p.EmployeesToDelete.RemoveAll(e => !keep.Contains(e));
+        }
+        Restrict(toDst, only);
+        Restrict(toSrc, only);
+    }
 
     int ok = 0, err = 0;
     async Task Apply(IAccessDevice target, string label, SyncPlan plan)
@@ -448,6 +611,343 @@ static async Task<int> RunFpSdkWriteback(
         return appeared ? 0 : 1;
     }
     catch (Exception ex) { Console.WriteLine("[WARN] verify read failed: " + ex.Message); return 1; }
+}
+
+// Repairs enrolments that exist on the target but under a non-attendance fingerprint type
+// (dismissingFP etc.). The device fixes a record's type at CREATE time and ignores it on update, so
+// the only way to correct one is to remove the record and write it again — and the only removal this
+// firmware accepts is deleting the person. Both are reconstructed from the source device.
+// Dry-run unless --apply is passed.
+static async Task<int> RunFpRepair(
+    Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
+    ILoggerFactory lf, DeviceEndpoint from, DeviceEndpoint to, bool apply, CancellationToken ct)
+{
+    var factory = new IsapiAccessDeviceFactory(sdkOptions, lf);
+    Console.WriteLine($"\nFINGERPRINT TYPE REPAIR  source {from.Ip} -> target {to.Ip}   ({(apply ? "APPLY" : "DRY RUN — pass --apply to execute")})\n");
+
+    var sourceUsers = new Dictionary<string, DeviceUser>(StringComparer.Ordinal);
+    var sourceFps = new Dictionary<string, List<FingerprintTemplate>>(StringComparer.Ordinal);
+    await using (var src = (IsapiAccessDevice)await factory.ConnectAsync(from, ct))
+    {
+        await foreach (var u in src.ReadUsersAsync(ct)) sourceUsers[u.EmployeeNo] = u;
+        await foreach (var f in src.ReadFingerprintsAsync(ct))
+        {
+            if (f.Template.Length == 0) continue;
+            if (!sourceFps.TryGetValue(f.EmployeeNo, out var l)) sourceFps[f.EmployeeNo] = l = new();
+            l.Add(f);
+        }
+    }
+    Console.WriteLine($"{from.Ip}: {sourceUsers.Count} people, {sourceFps.Count} with a normalFP template\n");
+
+    await using var dst = (IsapiAccessDevice)await factory.ConnectAsync(to, ct);
+    var targetUsers = new List<DeviceUser>();
+    await foreach (var u in dst.ReadUsersAsync(ct)) targetUsers.Add(u);
+
+    var broken = new List<(string Emp, string Types)>();
+    foreach (var u in targetUsers)
+    {
+        var raw = await dst.ReadRawFingerprintsAsync(u.EmployeeNo, ct);
+        if (raw.Count == 0) continue;
+        if (raw.Any(r => string.Equals(r.FingerType, "normalFP", StringComparison.OrdinalIgnoreCase))) continue;
+        if (!sourceFps.ContainsKey(u.EmployeeNo)) continue; // nothing to rebuild from — leave it alone
+        broken.Add((u.EmployeeNo, string.Join("/", raw.Select(r => r.FingerType))));
+    }
+
+    Console.WriteLine($"{to.Ip}: {broken.Count} person(s) enrolled only under a non-attendance type and repairable from the source:");
+    foreach (var b in broken) Console.WriteLine($"  {b.Emp,-8} currently {b.Types}");
+    if (broken.Count == 0) { Console.WriteLine("\nnothing to repair."); return 0; }
+    if (!apply) { Console.WriteLine("\nDry run — nothing was changed. Re-run with --apply to repair."); return 0; }
+
+    Console.WriteLine();
+    int fixedCount = 0, failed = 0;
+    foreach (var (emp, _) in broken)
+    {
+        try
+        {
+            await dst.DeleteUserAsync(emp, ct);
+            var user = sourceUsers.TryGetValue(emp, out var su)
+                ? new DeviceUser { EmployeeNo = emp, Name = su.Name, Enabled = su.Enabled, UserType = su.UserType }
+                : new DeviceUser { EmployeeNo = emp, Name = emp, Enabled = true };
+            await dst.UpsertUserAsync(user, ct);
+
+            bool allOk = true;
+            foreach (var fp in sourceFps[emp])
+            {
+                var status = await dst.SetFingerprintAsync(
+                    new FingerprintTemplate { EmployeeNo = emp, FingerIndex = fp.FingerIndex, FingerType = "normalFP", Template = fp.Template }, ct);
+                if (!status.Accepted) { allOk = false; Console.WriteLine($"  {emp,-8} FAILED: {status}"); }
+            }
+
+            var after = await dst.ReadRawFingerprintsAsync(emp, ct);
+            bool nowNormal = after.Any(r => string.Equals(r.FingerType, "normalFP", StringComparison.OrdinalIgnoreCase));
+            if (allOk && nowNormal) { fixedCount++; Console.WriteLine($"  {emp,-8} repaired -> {string.Join("/", after.Select(r => r.FingerType))}"); }
+            else { failed++; Console.WriteLine($"  {emp,-8} NOT repaired -> [{string.Join("/", after.Select(r => r.FingerType))}]"); }
+        }
+        catch (Exception ex) { failed++; Console.WriteLine($"  {emp,-8} ERROR: {ex.Message.Split('\n')[0]}"); }
+    }
+
+    Console.WriteLine($"\nrepaired {fixedCount}, failed {failed}, of {broken.Count}.");
+    return failed == 0 ? 0 : 1;
+}
+
+// Applies one non-duplicate template to a THROWAWAY employee under several fingerType spellings and
+// reports what the device actually stored. Answers "why does a pushed normalFP come back dismissingFP".
+static async Task<int> RunFpTypeTest(
+    Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
+    ILoggerFactory lf, DeviceEndpoint from, DeviceEndpoint to, string srcEmp, string labEmp, CancellationToken ct)
+{
+    var factory = new IsapiAccessDeviceFactory(sdkOptions, lf);
+    Console.WriteLine($"\nFINGERTYPE TEST — template of {srcEmp} from {from.Ip} -> throwaway {labEmp} on {to.Ip}\n");
+
+    FingerprintTemplate? source = null;
+    await using (var src = (IsapiAccessDevice)await factory.ConnectAsync(from, ct))
+        await foreach (var f in src.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, srcEmp, StringComparison.Ordinal)) { source = f; break; }
+    if (source is null) { Console.WriteLine($"{from.Ip} has no normalFP for {srcEmp}."); return 1; }
+    Console.WriteLine($"source template: {source.Template.Length} bytes, declared type '{source.FingerType}'\n");
+
+    await using var dst = (IsapiAccessDevice)await factory.ConnectAsync(to, ct);
+    await dst.UpsertUserAsync(new DeviceUser { EmployeeNo = labEmp, Name = "HIKSYNC_FPLAB", Enabled = true }, ct);
+
+    var variants = new (string Label, Dictionary<string, object?>? Extra)[]
+    {
+        ("fingerType=normalFP (as shipped)",     null),
+        ("fingerType=dismissingFP (control)",    new() { ["fingerType"] = "dismissingFP" }),
+        ("fingerType omitted entirely",          new() { ["fingerType"] = null }),
+        ("fingerType=normalFP + fingerPrintType",new() { ["fingerPrintType"] = "normalFP" }),
+        ("enableCardReader=[1] + cardReaderNo=1",new() { ["cardReaderNo"] = 1 }),
+    };
+
+    try
+    {
+        int slot = 1;
+        foreach (var (label, extra) in variants)
+        {
+            var fp = new FingerprintTemplate { EmployeeNo = labEmp, FingerIndex = slot, FingerType = "normalFP", Template = source.Template };
+            IsapiFingerprintStatus status;
+            try { status = await dst.SetFingerprintAsync(fp, extra, ct); }
+            catch (Exception ex) { Console.WriteLine($"  {label,-40} ERROR {ex.Message.Split('\n')[0]}"); slot++; continue; }
+
+            var raw = await dst.ReadRawFingerprintsAsync(labEmp, ct);
+            var stored = raw.FirstOrDefault(r => r.Slot == slot);
+            Console.WriteLine($"  {label,-40} recv={status.RecvStatus} msg='{status.ErrorMessage}' -> stored slot {slot}: " +
+                              (stored.FingerType is null or "" ? "(absent)" : $"type='{stored.FingerType}' {stored.Bytes}B"));
+            slot++;
+        }
+
+        Console.WriteLine($"\nall records on {labEmp}: " +
+            string.Join(", ", (await dst.ReadRawFingerprintsAsync(labEmp, ct)).Select(r => $"slot {r.Slot}={r.FingerType}")));
+    }
+    finally
+    {
+        try { await dst.DeleteUserAsync(labEmp, ct); Console.WriteLine($"cleanup: deleted {labEmp}"); }
+        catch (Exception ex) { Console.WriteLine($"cleanup FAILED for {labEmp}: {ex.Message}"); }
+    }
+    return 0;
+}
+
+// Copies one employee's fingerprint from `from` to `to` over ISAPI and reports the raw device verdict
+// plus a re-read, so "reported OK" and "actually stored" can be told apart.
+static async Task<int> RunPushFp(
+    Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
+    ILoggerFactory lf, DeviceEndpoint from, DeviceEndpoint to, string emp, string asEmp, CancellationToken ct)
+{
+    var factory = new IsapiAccessDeviceFactory(sdkOptions, lf);
+    Console.WriteLine($"\nPUSH FINGERPRINT  {from.Ip} employee {emp}  ->  {to.Ip} employee {asEmp}\n");
+
+    var source = new List<FingerprintTemplate>();
+    await using (var src = (IsapiAccessDevice)await factory.ConnectAsync(from, ct))
+        await foreach (var f in src.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal)) source.Add(f);
+
+    if (source.Count == 0) { Console.WriteLine($"{from.Ip} has no fingerprint for {emp}."); return 1; }
+    Console.WriteLine($"source: {source.Count} template(s), slots [{string.Join(",", source.Select(s => s.FingerIndex))}], {source[0].Template.Length} bytes\n");
+
+    await using var dst = (IsapiAccessDevice)await factory.ConnectAsync(to, ct);
+
+    async Task<List<int>> SlotsOnTarget()
+    {
+        var slots = new List<int>();
+        await foreach (var f in dst.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, asEmp, StringComparison.Ordinal)) slots.Add(f.FingerIndex);
+        return slots;
+    }
+
+    Console.WriteLine($"target slots before: [{string.Join(",", await SlotsOnTarget())}]");
+
+    await dst.UpsertUserAsync(new DeviceUser { EmployeeNo = asEmp, Name = asEmp, Enabled = true }, ct);
+    Console.WriteLine($"target person {asEmp} ensured");
+
+    foreach (var f in source)
+    {
+        var status = await dst.SetFingerprintAsync(
+            new FingerprintTemplate { EmployeeNo = asEmp, FingerIndex = f.FingerIndex, FingerType = f.FingerType, Template = f.Template }, ct);
+        Console.WriteLine($"  apply slot {f.FingerIndex}: recvStatus={status.RecvStatus} errorMsg='{status.ErrorMessage}' -> {status.Describe()}");
+    }
+
+    var after = await SlotsOnTarget();
+    Console.WriteLine($"\ntarget slots after : [{string.Join(",", after)}]");
+    bool ok = source.All(f => after.Contains(f.FingerIndex));
+    Console.WriteLine(ok ? "RESULT: PERSISTED." : "RESULT: NOT PERSISTED.");
+    return ok ? 0 : 1;
+}
+
+// Writes several DIFFERENT source templates to one throwaway employee over ISAPI FingerPrint/SetUp.
+// If the device is refusing duplicates, each rejection names the employee that already owns that
+// template — so errorMsg should track the source. Only the throwaway user is ever written to.
+static async Task<int> RunFpDupTest(
+    Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
+    ILoggerFactory lf, DeviceEndpoint endpoint, string labEmp, int sampleCount, CancellationToken ct)
+{
+    Console.WriteLine($"\nFP DUPLICATE TEST on {endpoint.Ip} — throwaway employee {labEmp}");
+    Console.WriteLine("Writes several different employees' templates to one throwaway person.");
+    Console.WriteLine("If the device dedups fingers, each rejection should name a DIFFERENT owner.\n");
+
+    var factory = new IsapiAccessDeviceFactory(sdkOptions, lf);
+    await using var dev = (IsapiAccessDevice)await factory.ConnectAsync(endpoint, ct);
+
+    var samples = new List<FingerprintTemplate>();
+    await foreach (var f in dev.ReadFingerprintsAsync(ct))
+    {
+        if (f.Template.Length == 0) continue;
+        samples.Add(f);
+        if (samples.Count >= sampleCount) break;
+    }
+    if (samples.Count == 0) { Console.WriteLine("no templates to sample."); return 1; }
+    Console.WriteLine($"sampled {samples.Count} template(s) from: {string.Join(", ", samples.Select(s => s.EmployeeNo))}\n");
+
+    await dev.UpsertUserAsync(new DeviceUser { EmployeeNo = labEmp, Name = "HIKSYNC_FPLAB", Enabled = true }, ct);
+    Console.WriteLine($"created throwaway person {labEmp}\n");
+
+    try
+    {
+        foreach (var s in samples)
+        {
+            var status = await dev.SetFingerprintAsync(
+                new FingerprintTemplate { EmployeeNo = labEmp, FingerIndex = 1, FingerType = "normalFP", Template = s.Template }, ct);
+            Console.WriteLine($"  template of employee {s.EmployeeNo,-8} -> recvStatus={status.RecvStatus}, errorMsg='{status.ErrorMessage}'  {(status.Accepted ? "STORED" : "")}");
+        }
+
+        var slots = new List<int>();
+        await foreach (var f in dev.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, labEmp, StringComparison.Ordinal)) slots.Add(f.FingerIndex);
+        Console.WriteLine($"\nslots now on {labEmp}: [{string.Join(",", slots)}]");
+        Console.WriteLine(
+            samples.Count > 1 && samples.Select(s => s.EmployeeNo).Distinct().Count() > 1
+                ? "\nIf each errorMsg equals the source employee, the device is refusing DUPLICATE fingers —\n" +
+                  "which is exactly what every previous test wrote. A genuinely new finger should store."
+                : "");
+    }
+    finally
+    {
+        try { await dev.DeleteUserAsync(labEmp, ct); Console.WriteLine($"cleanup: deleted {labEmp}"); }
+        catch (Exception ex) { Console.WriteLine($"cleanup FAILED for {labEmp}: {ex.Message}"); }
+    }
+    return 0;
+}
+
+// Sweeps NET_DVR_SET_FINGERPRINT parameters against a throwaway employee, to find what the device
+// accepts. The template comes from <srcEmp>; the writes all target <labEmp>, which this test creates
+// and deletes, so no real person's enrolment is touched.
+static async Task<int> RunFpSdkLab(
+    Microsoft.Extensions.Options.IOptions<SdkOptions> sdkOptions,
+    ILoggerFactory lf, DeviceEndpoint endpoint, string srcEmp, string labEmp, CancellationToken ct)
+{
+    Console.WriteLine($"\nFP SDK LAB — template from employee {srcEmp}, written to throwaway employee {labEmp}\n");
+
+    var isapiFactory = new IsapiAccessDeviceFactory(sdkOptions, lf);
+
+    // 1. Source template (ISAPI read is the path that works).
+    FingerprintTemplate? source = null;
+    await using (var readDev = await isapiFactory.ConnectAsync(endpoint, ct))
+    {
+        await foreach (var f in readDev.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, srcEmp, StringComparison.Ordinal)) { source = f; break; }
+    }
+    if (source is null) { Console.WriteLine($"employee {srcEmp} has no fingerprint to copy."); return 1; }
+    Console.WriteLine($"source template: {source.Template.Length} bytes, finger #{source.FingerIndex}, type={source.FingerType}\n");
+
+    var sdkMgr = new HcNetSdkManager(sdkOptions, lf.CreateLogger<HcNetSdkManager>());
+    var sdkFactory = new HikvisionDeviceFactory(sdkMgr, lf);
+
+    async Task<int> CountCards()
+    {
+        await using var d = await sdkFactory.ConnectAsync(endpoint, ct);
+        int n = 0;
+        await foreach (var _ in d.ReadUsersAsync(ct)) n++;
+        return n;
+    }
+
+    async Task<bool> IsapiHasUser(string emp)
+    {
+        await using var d = await isapiFactory.ConnectAsync(endpoint, ct);
+        await foreach (var u in d.ReadUsersAsync(ct))
+            if (string.Equals(u.EmployeeNo, emp, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    async Task<List<int>> IsapiSlots(string emp)
+    {
+        await using var d = await isapiFactory.ConnectAsync(endpoint, ct);
+        var slots = new List<int>();
+        await foreach (var f in d.ReadFingerprintsAsync(ct))
+            if (string.Equals(f.EmployeeNo, emp, StringComparison.Ordinal)) slots.Add(f.FingerIndex);
+        return slots;
+    }
+
+    Console.WriteLine($"cards visible to the SDK (NET_DVR_GET_CARD): {await CountCards()}");
+
+    // 2. Create the throwaway PERSON over ISAPI (card-less, exactly like the real users).
+    await using (var d = await isapiFactory.ConnectAsync(endpoint, ct))
+        await d.UpsertUserAsync(new DeviceUser { EmployeeNo = labEmp, Name = "HIKSYNC_FPLAB", Enabled = true }, ct);
+    Console.WriteLine($"created person {labEmp} over ISAPI: exists={await IsapiHasUser(labEmp)}\n");
+
+    async Task Sweep(string phase)
+    {
+        Console.WriteLine($"--- {phase} ---");
+        await using var sdkDev = (HikvisionAccessDevice)await sdkFactory.ConnectAsync(endpoint, ct);
+        foreach (var (label, type, reader) in new (string, byte?, uint?)[]
+        {
+            ("byFingerType=1 reader=1", (byte)1, 1u),
+            ("byFingerType=0 reader=1", (byte)0, 1u),
+            ("byFingerType=1 reader=0", (byte)1, 0u),
+            ("byFingerType=2 reader=1", (byte)2, 1u),
+        })
+        {
+            try
+            {
+                var r = await sdkDev.TrySetFingerprintAsync(
+                    new FingerprintTemplate { EmployeeNo = labEmp, FingerIndex = 1, Template = source.Template }, type, reader, ct);
+                Console.WriteLine($"  {label,-26} recvStatus={r.RecvStatus} ({HikvisionAccessDevice.DescribeRecvStatus(r.RecvStatus)}), readerStatus={r.CardReaderRecvStatus}, msg='{r.ErrorMessage}'");
+            }
+            catch (Exception ex) { Console.WriteLine($"  {label,-26} EXCEPTION: {ex.Message}"); }
+        }
+        Console.WriteLine($"  -> slots on {labEmp} after this phase: [{string.Join(",", await IsapiSlots(labEmp))}]\n");
+    }
+
+    await Sweep("PHASE 1: person exists, NO card (this is today's production state)");
+
+    // 3. Give the person a card whose number is the employee no, then repeat.
+    try
+    {
+        await using var sdkDev = await sdkFactory.ConnectAsync(endpoint, ct);
+        await sdkDev.UpsertUserAsync(new DeviceUser { EmployeeNo = labEmp, Name = "HIKSYNC_FPLAB", Enabled = true }, ct);
+        Console.WriteLine($"SDK SET_CARD for {labEmp} OK; cards visible to the SDK now: {await CountCards()}\n");
+    }
+    catch (Exception ex) { Console.WriteLine($"SDK SET_CARD failed: {ex.Message}\n"); }
+
+    await Sweep("PHASE 2: person + card");
+
+    // 4. Clean up the throwaway person (and its card).
+    try
+    {
+        await using var d = await isapiFactory.ConnectAsync(endpoint, ct);
+        await d.DeleteUserAsync(labEmp, ct);
+        Console.WriteLine($"cleanup: deleted {labEmp}; still present={await IsapiHasUser(labEmp)}");
+    }
+    catch (Exception ex) { Console.WriteLine($"cleanup FAILED for {labEmp} — remove it via the device UI: {ex.Message}"); }
+
+    return 0;
 }
 
 // Reads <emp>'s own fingerprint and writes it straight back under several payload shapes, to find the
