@@ -234,6 +234,22 @@ public sealed class IsapiAccessDevice : IAccessDevice
         }
     }
 
+    /// <summary>Diagnostic: every fingerprint record for an employee, including non-attendance types.</summary>
+    public async Task<List<(int Slot, string FingerType, int Bytes)>> ReadRawFingerprintsAsync(string employeeNo, CancellationToken ct)
+    {
+        var body = new { FingerPrintCond = new { searchID = "hiksync", cardReaderNo = 1, employeeNo } };
+        using var doc = await SendJsonAsync(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintUpload?format=json", body, ct);
+        var result = new List<(int, string, int)>();
+        if (doc.RootElement.TryGetProperty("FingerPrintInfo", out var info) &&
+            info.TryGetProperty("FingerPrintList", out var list) && list.ValueKind == JsonValueKind.Array)
+            foreach (var f in list.EnumerateArray())
+                result.Add((
+                    f.TryGetProperty("fingerPrintID", out var fid) && fid.TryGetInt32(out int i) ? i : 0,
+                    Str(f, "fingerType"),
+                    SafeBase64(Str(f, "fingerData")).Length));
+        return result;
+    }
+
     private async Task<List<FingerprintTemplate>> GetFingerprintsAsync(string employeeNo, CancellationToken ct)
     {
         var body = new { FingerPrintCond = new { searchID = "hiksync", cardReaderNo = 1, employeeNo } };
@@ -247,16 +263,12 @@ public sealed class IsapiAccessDevice : IAccessDevice
                 string data = Str(f, "fingerData");
                 if (string.IsNullOrEmpty(data)) continue;
 
-                // Only attendance fingers are synced. Special types (dismissingFP/coerceFP/… — alarm
-                // and duress fingers) are device-local security config; copying them to the partner is
-                // both wrong and rejected by the firmware as badParameters.
+                // Every enrolled finger is returned, including special types (dismissingFP/coerceFP —
+                // alarm and duress fingers). The planner decides what to copy; it must still SEE these
+                // records, because the slot they occupy is taken and the device rejects a second finger
+                // written over it. Filtering them out here made the sync believe those people had no
+                // fingerprint and re-push them on every cycle, forever.
                 string fingerType = Str(f, "fingerType");
-                if (!string.IsNullOrEmpty(fingerType) && !string.Equals(fingerType, "normalFP", StringComparison.OrdinalIgnoreCase))
-                {
-                    _logger.LogDebug("Skipping {Type} fingerprint for {Emp} (not an attendance finger).", fingerType, employeeNo);
-                    continue;
-                }
-
                 int id = f.TryGetProperty("fingerPrintID", out var fid) && fid.TryGetInt32(out var i) ? i : 1;
                 result.Add(new FingerprintTemplate
                 {
@@ -271,18 +283,65 @@ public sealed class IsapiAccessDevice : IAccessDevice
 
     public async Task UpsertFingerprintAsync(FingerprintTemplate fingerprint, CancellationToken ct)
     {
-        var body = new
+        var status = await SetFingerprintAsync(fingerprint, ct);
+        if (!status.Accepted)
+            throw new InvalidOperationException(
+                $"FingerPrint/SetUp({fingerprint.EmployeeNo}#{fingerprint.FingerIndex}) rejected by {Endpoint.Ip}: {status}");
+    }
+
+    /// <summary>
+    /// Applies one fingerprint template and returns the device's verdict rather than throwing.
+    ///
+    /// Endpoint choice matters: /AccessControl/FingerPrintDownload — the endpoint named in the older
+    /// ISAPI guides — exists on DS-K1A8503MF-B V1.4.1 but rejects every well-formed payload with a
+    /// bare `badParameters`. /AccessControl/FingerPrint/SetUp takes the identical FingerPrintCfg body
+    /// and actually applies it. The HTTP status alone is not the verdict: the device answers 200 and
+    /// reports acceptance per card reader in FingerPrintStatus.StatusList[].cardReaderRecvStatus.
+    /// </summary>
+    public Task<IsapiFingerprintStatus> SetFingerprintAsync(FingerprintTemplate fingerprint, CancellationToken ct) =>
+        SetFingerprintAsync(fingerprint, extraFields: null, ct);
+
+    /// <inheritdoc cref="SetFingerprintAsync(FingerprintTemplate, CancellationToken)"/>
+    /// <param name="extraFields">Diagnostic hook: extra/override members merged into FingerPrintCfg.</param>
+    public async Task<IsapiFingerprintStatus> SetFingerprintAsync(
+        FingerprintTemplate fingerprint, IDictionary<string, object?>? extraFields, CancellationToken ct)
+    {
+        var cfg = new Dictionary<string, object?>
         {
-            FingerPrintCfg = new
-            {
-                employeeNo = fingerprint.EmployeeNo,
-                enableCardReader = new[] { 1 },
-                fingerPrintID = fingerprint.FingerIndex,
-                fingerType = string.IsNullOrEmpty(fingerprint.FingerType) ? "normalFP" : fingerprint.FingerType,
-                fingerData = Convert.ToBase64String(fingerprint.Template),
-            },
+            ["employeeNo"] = fingerprint.EmployeeNo,
+            ["enableCardReader"] = new[] { 1 },
+            ["fingerPrintID"] = fingerprint.FingerIndex,
+            ["fingerType"] = string.IsNullOrEmpty(fingerprint.FingerType) ? "normalFP" : fingerprint.FingerType,
+            ["fingerData"] = Convert.ToBase64String(fingerprint.Template),
         };
-        (await SendJsonAsync(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrintDownload?format=json", body, ct)).Dispose();
+        if (extraFields is not null)
+            foreach (var kv in extraFields)
+            {
+                if (kv.Value is null) cfg.Remove(kv.Key);
+                else cfg[kv.Key] = kv.Value;
+            }
+        var body = new Dictionary<string, object?> { ["FingerPrintCfg"] = cfg };
+
+        using (var doc = await SendJsonAsync(HttpMethod.Post, "/ISAPI/AccessControl/FingerPrint/SetUp?format=json", body, ct))
+        {
+            var immediate = IsapiFingerprintStatus.Parse(doc.RootElement);
+            if (immediate is not null) return immediate;
+        }
+
+        // The apply is asynchronous: when the POST answers without a StatusList, the verdict arrives
+        // on the progress resource instead.
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            await Task.Delay(200, ct);
+            using var resp = await _http.GetAsync("/ISAPI/AccessControl/FingerPrintProgress?format=json", ct);
+            string json = await resp.Content.ReadAsStringAsync(ct);
+            if (!resp.IsSuccessStatusCode || string.IsNullOrWhiteSpace(json)) continue;
+            using var doc = JsonDocument.Parse(json);
+            var polled = IsapiFingerprintStatus.Parse(doc.RootElement);
+            if (polled is not null) return polled;
+        }
+
+        return new IsapiFingerprintStatus(0, string.Empty);
     }
 
     private async Task<JsonDocument> SendJsonAsync(HttpMethod method, string path, object body, CancellationToken ct)

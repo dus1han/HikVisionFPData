@@ -96,11 +96,14 @@ public sealed class SyncOptions
     public bool SyncFingerprints { get; set; } = true;
 
     /// <summary>
-    /// Transport for writing fingerprint templates: "isapi" or "sdk". ISAPI FingerPrintDownload is
-    /// rejected by some firmware (e.g. DS-K1A8503MF-B V1.4.1) for its own templates; the HCNetSDK
-    /// NET_DVR_SET_FINGERPRINT path works there (verified round-trip). Reads and everything else stay
-    /// on the primary transport regardless — only the fingerprint WRITE switches. "sdk" needs the
-    /// native HCNetSDK DLLs present and the SDK port reachable.
+    /// Transport for writing fingerprint templates: "isapi" or "sdk". Leave this on "isapi".
+    ///
+    /// ISAPI writes go to /AccessControl/FingerPrint/SetUp. The endpoint named in the older ISAPI
+    /// guides, /AccessControl/FingerPrintDownload, also exists on DS-K1A8503MF-B V1.4.1 but rejects
+    /// every well-formed payload with a bare `badParameters` — using it was why fingerprint sync
+    /// appeared impossible on this hardware. "sdk" (NET_DVR_SET_FINGERPRINT) also works but needs the
+    /// native HCNetSDK DLLs, the SDK port, and an out-of-process host to contain native crashes.
+    /// Reads and everything else stay on the primary transport regardless — only the WRITE switches.
     /// </summary>
     public string FingerprintTransport { get; set; } = "isapi";
 

@@ -9,6 +9,12 @@ using static HikSync.Device.Hikvision.HikvisionInterop;
 
 namespace HikSync.Device.Hikvision;
 
+/// <summary>The device's per-record verdict on a fingerprint write (NET_DVR_FINGERPRINT_STATUS).</summary>
+public readonly record struct FingerprintSetStatus(byte RecvStatus, byte CardReaderRecvStatus, string ErrorMessage)
+{
+    public bool Accepted => RecvStatus == 1;
+}
+
 /// <summary>
 /// HCNetSDK-backed device connection (SDK V6.1.9.4).
 ///
@@ -341,11 +347,32 @@ public sealed class HikvisionAccessDevice : IAccessDevice
 
     private void SetFingerprintBlocking(FingerprintTemplate fp)
     {
+        var result = TrySetFingerprintBlocking(fp, fingerType: null, readerNo: null);
+        if (!result.Accepted)
+            throw new HcNetSdkException(
+                $"SET_FINGERPRINT({fp.EmployeeNo}/{fp.FingerIndex}): device rejected " +
+                $"(recvStatus={result.RecvStatus} — {DescribeRecvStatus(result.RecvStatus)}, " +
+                $"readerStatus={result.CardReaderRecvStatus}, msg='{result.ErrorMessage}')", 0);
+    }
+
+    /// <summary>
+    /// Diagnostic: performs the SET_FINGERPRINT write and returns the device's per-record verdict
+    /// instead of throwing, so callers can sweep parameters. <paramref name="fingerType"/> and
+    /// <paramref name="readerNo"/> override the defaults when probing.
+    /// </summary>
+    public Task<FingerprintSetStatus> TrySetFingerprintAsync(
+        FingerprintTemplate fp, byte? fingerType, uint? readerNo, CancellationToken ct) =>
+        Task.Run(() => TrySetFingerprintBlocking(fp, fingerType, readerNo), ct);
+
+    private FingerprintSetStatus TrySetFingerprintBlocking(FingerprintTemplate fp, byte? fingerType, uint? readerNo)
+    {
+        uint reader = readerNo ?? DefaultReaderNo;
+
         var cond = new NET_DVR_FINGERPRINT_COND();
         cond.Init();
         cond.dwSize = (uint)Marshal.SizeOf<NET_DVR_FINGERPRINT_COND>();
         cond.dwFingerPrintNum = 1;
-        cond.dwEnableReaderNo = DefaultReaderNo;
+        cond.dwEnableReaderNo = reader;
 
         int handle = StartRemoteConfig(NET_DVR_SET_FINGERPRINT, cond, cond.dwSize);
         try
@@ -354,29 +381,43 @@ public sealed class HikvisionAccessDevice : IAccessDevice
             rec.Init();
             rec.dwSize = (uint)Marshal.SizeOf<NET_DVR_FINGERPRINT_RECORD>();
             WriteAscii(rec.byCardNo, fp.EmployeeNo);
-            rec.dwEnableReaderNo = DefaultReaderNo;
+            rec.dwEnableReaderNo = reader;
             rec.byFingerPrintID = (byte)fp.FingerIndex;
-            rec.byFingerType = 0; // normal
+            // 1 = normal attendance finger, 2 = duress. 0 is NOT "normal": this field previously sent 0,
+            // and the device filed those templates as dismissingFP (a disarm finger) — stored, but
+            // invisible to the normalFP-only read path and useless for attendance.
+            rec.byFingerType = fingerType ?? 1;
             int len = Math.Min(fp.Template.Length, rec.byFingerData!.Length);
             Array.Copy(fp.Template, rec.byFingerData, len);
             rec.dwFingerPrintLen = (uint)len;
 
+            var verdict = default(FingerprintSetStatus);
             SendOne(handle, rec, rec.dwSize, Marshal.SizeOf<NET_DVR_FINGERPRINT_STATUS>(), $"SET_FINGERPRINT({fp.EmployeeNo}/{fp.FingerIndex})",
                 statusPtr =>
                 {
                     // The device's real verdict is in the per-record status struct — SUCCESS from the
                     // send call only means "message received". byRecvStatus 1 = stored, else rejected.
                     var st = Marshal.PtrToStructure<NET_DVR_FINGERPRINT_STATUS>(statusPtr);
-                    if (st.byRecvStatus != 1)
-                    {
-                        string err = System.Text.Encoding.ASCII.GetString(st.byErrorMsg ?? Array.Empty<byte>()).TrimEnd('\0', ' ');
-                        throw new HcNetSdkException(
-                            $"SET_FINGERPRINT({fp.EmployeeNo}/{fp.FingerIndex}): device rejected (recvStatus={st.byRecvStatus}, readerStatus={st.byCardReaderRecvStatus}, msg='{err}')", 0);
-                    }
+                    string err = Encoding.ASCII.GetString(st.byErrorMsg ?? Array.Empty<byte>()).TrimEnd('\0', ' ');
+                    verdict = new FingerprintSetStatus(st.byRecvStatus, st.byCardReaderRecvStatus, err);
                 });
+            return verdict;
         }
         finally { NET_DVR_StopRemoteConfig(handle); }
     }
+
+    /// <summary>
+    /// Meanings of NET_DVR_FINGERPRINT_STATUS.byRecvStatus, confirmed against DS-K1A8503MF-B V1.4.1.
+    /// 5 is the one that matters: it is NOT a malformed-request error, it means the finger is already
+    /// enrolled on this device — byErrorMsg carries the employee number that owns it.
+    /// </summary>
+    public static string DescribeRecvStatus(byte status) => status switch
+    {
+        0 => "no verdict returned",
+        1 => "stored",
+        5 => "this finger is already enrolled on the device (see errorMsg for the owner)",
+        _ => $"the card reader refused the template (recvStatus={status})",
+    };
 
     // Marshals a condition struct, starts a remote-config session, returns the handle (throws on failure).
     private int StartRemoteConfig<T>(int command, T cond, uint size) where T : struct
