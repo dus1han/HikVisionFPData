@@ -84,6 +84,68 @@ public class SyncPlannerTests
         // Applying both leaves each device holding {1, 2} — the union.
     }
 
+    private static FingerprintTemplate Typed(string emp, int finger, string type, params byte[] data) =>
+        new() { EmployeeNo = emp, FingerIndex = finger, FingerType = type, Template = data };
+
+    // The terminal deduplicates biometrically: the same finger enrolled on two devices yields two
+    // different templates under unrelated slot numbers, and the device declines the copy. Diffing by
+    // slot re-pushed it on every cycle and the pair never converged.
+    [Fact]
+    public void BuildMissingOnly_PersonAlreadyEnrolledUnderAnotherSlot_IsNotPushedAgain()
+    {
+        var users = new[] { User("56") };
+        var source = new[] { Fp("56", 2, 1, 1, 1) };   // enrolled in slot 2 here
+        var target = new[] { Fp("56", 1, 7, 7, 7) };   // same person, slot 1, different bytes
+
+        SyncPlanner.BuildMissingOnly(users, source, users, target)
+            .FingerprintsToUpsert.Should().BeEmpty();
+    }
+
+    // A duress finger occupies the slot and the device refuses a second finger over it, so it has to
+    // count as coverage — otherwise the sync retries that person forever.
+    [Fact]
+    public void BuildMissingOnly_NonAttendanceFingerOnTarget_CountsAsCoverage()
+    {
+        var users = new[] { User("692") };
+        var source = new[] { Fp("692", 1, 1, 2, 3) };
+        var target = new[] { Typed("692", 1, "dismissingFP", 9, 9) };
+
+        SyncPlanner.BuildMissingOnly(users, source, users, target)
+            .FingerprintsToUpsert.Should().BeEmpty();
+    }
+
+    // ...but a duress finger is device-local security config and must never be copied to the partner.
+    [Fact]
+    public void BuildMissingOnly_NeverCopiesNonAttendanceFingers()
+    {
+        var users = new[] { User("692") };
+        var source = new[] { Typed("692", 1, "dismissingFP", 1, 2, 3) };
+
+        SyncPlanner.BuildMissingOnly(users, source, users, Array.Empty<FingerprintTemplate>())
+            .FingerprintsToUpsert.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void BuildMissingOnly_PersonWithNoFingerprintOnTarget_IsPushed()
+    {
+        var users = new[] { User("244") };
+        var source = new[] { Fp("244", 1, 1, 2, 3) };
+
+        SyncPlanner.BuildMissingOnly(users, source, users, Array.Empty<FingerprintTemplate>())
+            .FingerprintsToUpsert.Should().ContainSingle(f => f.EmployeeNo == "244" && f.FingerIndex == 1);
+    }
+
+    [Fact]
+    public void BuildMissingOnly_ExtraFingerOnSource_StillPropagates()
+    {
+        var users = new[] { User("77") };
+        var source = new[] { Fp("77", 1, 1), Fp("77", 2, 2) };
+        var target = new[] { Fp("77", 1, 1) };
+
+        SyncPlanner.BuildMissingOnly(users, source, users, target)
+            .FingerprintsToUpsert.Should().ContainSingle(f => f.FingerIndex == 2);
+    }
+
     [Fact]
     public void DeletesRemovedUsers_OnlyWhenEnabled()
     {

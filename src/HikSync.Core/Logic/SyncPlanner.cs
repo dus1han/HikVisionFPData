@@ -24,6 +24,20 @@ public static class SyncPlanner
     /// Used for the bidirectional (union) sync so a couple ends up holding the same full set.
     /// Deliberately does NOT flag changed records — otherwise two devices would overwrite each
     /// other's differing copies on every cycle.
+    ///
+    /// Fingerprint types are treated asymmetrically on purpose:
+    ///  * only attendance fingers are COPIED (a duress finger is device-local security config), while
+    ///  * every enrolled finger COUNTS as coverage on the target.
+    /// Counting only attendance fingers would make the sync re-push a slot that is already occupied
+    /// by a duress finger every cycle — the device refuses it as an already-enrolled finger, and the
+    /// pair never converges.
+    ///
+    /// Coverage is compared per PERSON, not per finger slot. The terminal deduplicates biometrically:
+    /// it refuses a finger it already holds even when the template bytes differ, because the same
+    /// finger enrolled twice produces two different blobs. Two devices enrolled independently
+    /// therefore hold the same person's finger under unrelated slot numbers, and a slot-by-slot diff
+    /// would push a copy the device silently declines — forever. A person is considered covered once
+    /// the target holds at least as many fingers for them as the source has to offer.
     /// </summary>
     public static SyncPlan BuildMissingOnly(
         IReadOnlyCollection<DeviceUser> sourceUsers,
@@ -38,10 +52,19 @@ public static class SyncPlanner
             if (!targetEmployees.Contains(user.EmployeeNo))
                 plan.UsersToUpsert.Add(user);
 
-        var targetPrints = new HashSet<(string, int)>(targetFingerprints.Select(f => f.Key));
-        foreach (var fp in sourceFingerprints)
-            if (!targetPrints.Contains(fp.Key))
-                plan.FingerprintsToUpsert.Add(fp);
+        var targetCountByEmployee = targetFingerprints
+            .GroupBy(f => f.EmployeeNo, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+        var targetSlots = new HashSet<(string, int)>(targetFingerprints.Select(f => f.Key));
+
+        foreach (var group in sourceFingerprints.Where(f => f.IsAttendanceFinger)
+                                                .GroupBy(f => f.EmployeeNo, StringComparer.Ordinal))
+        {
+            if (targetCountByEmployee.GetValueOrDefault(group.Key) >= group.Count()) continue;
+            foreach (var fp in group)
+                if (!targetSlots.Contains(fp.Key))
+                    plan.FingerprintsToUpsert.Add(fp);
+        }
 
         return plan;
     }

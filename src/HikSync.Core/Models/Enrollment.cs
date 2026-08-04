@@ -26,10 +26,20 @@ public sealed class FingerprintTemplate
 
     /// <summary>
     /// Device fingerprint type — normalFP for an attendance finger; special values like dismissingFP
-    /// or coerceFP are alarm/duress fingers. Preserved so a synced print keeps its meaning; writing
-    /// the wrong type is rejected as badParameters.
+    /// or coerceFP are alarm/duress fingers. The device fixes this when the record is CREATED and
+    /// ignores it on a later update, so a record enrolled under the wrong type can only be corrected
+    /// by removing it and writing it again.
     /// </summary>
     public string FingerType { get; set; } = "normalFP";
+
+    /// <summary>
+    /// True for an ordinary attendance finger. Only these are copied to a partner device: duress and
+    /// alarm fingers are device-local security config and propagating them would arm the same alarm
+    /// on a terminal the operator never configured for it. They still count as *enrolled* though —
+    /// see <see cref="Logic.SyncPlanner.BuildMissingOnly"/>.
+    /// </summary>
+    public bool IsAttendanceFinger =>
+        string.IsNullOrEmpty(FingerType) || FingerType.Equals("normalFP", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Opaque template bytes, copied binary between compatible devices.</summary>
     public byte[] Template { get; set; } = Array.Empty<byte>();
