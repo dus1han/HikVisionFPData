@@ -1,55 +1,127 @@
 # HikSync — session handoff (2026-08-04)
 
-State for a Claude Code session running **on the server** (the box that can reach the terminals on
-192.168.1.x and the HikSync Postgres). The prior work happened on a dev box that cannot reach the
-devices, which is why everything went through copy-paste.
+Fingerprint sync **works**. This note records what was wrong, how it was proven on the hardware, and
+what is left to decide.
 
-## What works
-- **Attendance capture** (ISAPI AcsEvent) → local Postgres → **push to HRIS API** (`insertB`). Solid.
-- **User/card sync** over ISAPI. `--write-test` persists. Fine.
-- Diagnostic tables: `sync_failure`, `device_enrollment` (per-device roster). Auto-migrated (0003/0004).
+## Status
 
-## The open problem: fingerprint sync
-Fingerprint **templates won't transfer over ISAPI** on the DS-K1A8503MF-B (V1.4.1) — proven
-exhaustively (`--fp-selftest`): correct structure, every scalar field validated, `fingerData`
-required inline, inline rejected as `badParameters`.
+| Function | State |
+| --- | --- |
+| Attendance capture → local Postgres → push to HRIS (`insertB`) | working |
+| User sync over ISAPI | working |
+| **Fingerprint sync between paired terminals** | **working** — Printing pair converged, 54 users / 54 fingerprints on both `.219` and `.220` |
+| Forming pair `.221` / `.222` | **offline** — no ping, no ISAPI on :80, no SDK on :8000. Nothing to do with the code. |
 
-**SDK is the path** (as iVMS uses). SDK login WORKS (`--transport sdk --port 8000`). The write is
-routed **out of process** (service spawns `HikSync.Service.exe fp-sdk-apply <job>`) so a native crash
-can't kill the service — that isolation works; the service is now stable.
+## What was actually wrong
 
-**But the SDK write does not persist.** `--fp-sdk-writeback <emp>` (writes the employee's template to
-a FREE finger slot, then re-reads to confirm it appears) shows **NOT PERSISTED**. The device's
-per-record status now surfaces: `NET_DVR_SET_FINGERPRINT` → `recvStatus=5` (1 = stored), empty
-`byErrorMsg`. So the device silently rejects the downloaded template with code 5.
+Three separate faults stacked on top of each other, and each one hid the next.
 
-### Where to dig (SDK P/Invoke in `src/HikSync.Device/Hikvision/`)
-- `SetFingerprintBlocking` (HikvisionAccessDevice.cs) builds `NET_DVR_FINGERPRINT_RECORD`:
-  `byCardNo = employeeNo`, `byFingerType = 0`, `byFingerPrintID = slot`, `byFingerData`, len.
-  **Suspects for recvStatus=5:** `byFingerType=0` may be wrong (try 1); the person may need a card
-  association the SDK sees; card-less users (SDK `GET_CARD` returns 0 — these are card-less); reader
-  number; or these devices only accept on-scanner enrollment via `CaptureFingerPrint`, not download.
-- Read path (`ReadCardFingerprintsBlocking`) works and round-trips via `GetNextRemoteConfig`.
-- `--fp-sdk-writeback <emp>` is the fast persistence test (writes to a free slot, verifies it appears).
-  Run it against a device with `--transport sdk --port 8000` on an employee that has a **normalFP**
-  (dismissingFP is skipped on read).
+**1. Wrong ISAPI endpoint.** The write used `POST /ISAPI/AccessControl/FingerPrintDownload` — the
+endpoint the older ISAPI guides document. It exists on DS-K1A8503MF-B V1.4.1 and validates each field
+individually (send a bad `enableCardReader` and it answers `illegalCardReaderNo`, a bad
+`fingerPrintID` and it answers `errorFingerID`), but once every field is valid it rejects the request
+with a bare `badParameters` — regardless of payload, encoding, length, target slot, or employee. It
+is simply not wired up on this firmware.
 
-### Config
-`Sync:FingerprintTransport` = `sdk` routes fp writes over the SDK (default `isapi`). `Sync:SdkPort`
-= 8000. `Sync:SyncFingerprints=false` disables fp entirely. Deploy copies must use
-`robocopy <src> <dst> /E /XF appsettings.json` so the config isn't clobbered.
+The endpoint that works is **`POST /ISAPI/AccessControl/FingerPrint/SetUp`**, which takes the byte-for-byte
+identical `FingerPrintCfg` body and applies it.
 
-## Environment gotchas
-- Two Postgres exist; the service's `ConnectionString` must point at the one holding `device_pairs`
-  (a wrong/empty `localhost/hiksync` cost hours — the service ran but saw 0 pairs). Verify with the
-  connection string from `appsettings.json`, not pgAdmin's default.
-- Service runs as **LocalSystem**; native SDK crashes there (hence out-of-process). Consider running
-  under the user account DeviceCheck worked under.
-- Devices: `.219/.220` (Printing), `.221/.222` (Forming). `.220` pass `123456bio`, `.219` `Asd@1234`.
-- `.220` employee 56 has a `dismissingFP` (special, skipped on read).
+**2. The device's verdict was never read.** `FingerPrint/SetUp` answers **HTTP 200 whether or not it
+stored anything**. The real outcome is in `FingerPrintStatus.StatusList[].cardReaderRecvStatus`
+(1 = stored). Nothing checked it, so rejected templates were reported as synced.
 
-## Immediate next step
-Figure out `recvStatus=5`. Iterate on `SetFingerprintBlocking`: try `byFingerType=1`; inspect the
-full status struct; compare our record bytes to what iVMS sends (a Wireshark capture of iVMS pushing
-a fingerprint to one of these devices would be definitive). `--fp-sdk-writeback` gives a 30-second
-persist/reject signal per attempt.
+**3. `cardReaderRecvStatus = 5` was misread as a malformed request.** It means *"this finger is
+already enrolled on this device"*, and `errorMsg` carries **the employee number that already owns
+it**. This is the finding that unblocked everything: every earlier diagnostic
+(`--fp-selftest`, `--fp-sdk-writeback`) wrote a person's own template back to a free slot, which is by
+definition a duplicate — so a working write path was being tested with input the device is *supposed*
+to refuse, and the resulting "5" was read as proof the path was broken. Proof it is a duplicate check:
+push four different people's templates to one throwaway person and each rejection names a different
+owner.
+
+```
+template of employee 692  -> recvStatus=5, errorMsg='692'
+template of employee 244  -> recvStatus=5, errorMsg='244'
+template of employee 632  -> recvStatus=5, errorMsg='632'
+template of employee 479  -> recvStatus=5, errorMsg='479'
+```
+
+The SDK path (`NET_DVR_SET_FINGERPRINT`) was never broken either — same status code, same meaning. It
+did have a real bug: `byFingerType` was sent as `0`, and the device filed those templates as
+`dismissingFP`. They stored fine; the ISAPI reader then skipped them as a non-attendance type, so
+`--fp-sdk-writeback` re-read and concluded "NOT PERSISTED". That is where the 49 mistyped records on
+`.219` came from.
+
+## Two device behaviours the sync now has to respect
+
+- **Deduplication is biometric, not byte-wise.** The same finger enrolled on two terminals produces
+  two different 512-byte templates, and the device still recognises and refuses the copy. Confirmed:
+  `.219`'s employee-56 template, pushed to `.220` under a different employee, came back
+  `recvStatus=5 errorMsg='56'`. Diffing enrolment slot-by-slot therefore never converges — the plan
+  keeps proposing a copy the device keeps declining. `SyncPlanner.BuildMissingOnly` now compares
+  coverage **per person**.
+- **A record's `fingerType` is fixed when it is created** and ignored on update. Re-applying a
+  template with `fingerType: normalFP` over a `dismissingFP` record leaves it `dismissingFP`. The only
+  way to correct one is to delete the person and write them again.
+
+## Changes
+
+- `IsapiAccessDevice.UpsertFingerprintAsync` → `FingerPrint/SetUp`, and it now parses the device
+  verdict and throws with the decoded reason (`IsapiFingerprintStatus`). Falls back to polling
+  `/AccessControl/FingerPrintProgress` when the apply answers asynchronously.
+- The ISAPI reader returns **every** enrolled finger, not just `normalFP`. It used to hide special
+  types, so the sync believed those people had no fingerprint and re-pushed them every cycle forever.
+- `SyncPlanner.BuildMissingOnly`: copies only attendance fingers, but counts **every** enrolled finger
+  as coverage, per person.
+- `HikvisionAccessDevice`: `byFingerType` 1 (not 0); `recvStatus` decoded correctly; added
+  `TrySetFingerprintAsync` which returns the verdict instead of throwing.
+- `Sync:FingerprintTransport` → **`isapi`** in the deployed config. With this the service makes no
+  native SDK calls at all, so the LocalSystem native-crash problem is gone.
+- Tests: 26 pass (was 17). New coverage for the status parsing and for both planner rules.
+
+## Open decision: the 49 `dismissingFP` records on `.219`
+
+They are **working** — those people punch on `.219` and the events arrive as ordinary fingerprint
+verifications (major 5 / minor 38, 130 events in the last two weeks). The sync now recognises them as
+coverage and leaves them alone, so nothing is broken and nothing loops.
+
+They are still the wrong type. To normalise them:
+
+```
+HikSync.DeviceCheck --ip 192.168.1.219 --pass <pw> --transport isapi \
+    --fp-repair --from 192.168.1.220 --from-pass <pw>          # dry run
+    ... --apply                                                 # execute
+```
+
+It deletes and recreates each person from the partner device, because that is the only way to change a
+record's type. Employees 692 and 244 were already put through it and came back `normalFP`. Weigh a
+brief window where a person is absent from the terminal against a cosmetic fix — they work as they are.
+
+## Diagnostics added to `HikSync.DeviceCheck`
+
+| Flag | What it does |
+| --- | --- |
+| `--compare <ip>` | read-only: what a two-way sync would transfer between two devices |
+| `--fp-inventory` | every fingerprint record incl. types the sync reader filters |
+| `--push-fp <emp> --from <ip>` | copy one person's fingerprint, print the raw verdict, verify persistence |
+| `--fp-dup-test [n]` | prove the device refuses duplicates and names the owner |
+| `--fp-repair --from <ip> [--apply]` | rebuild enrolments stored under a non-attendance type |
+| `--isapi <path> [--method M] [--body JSON]` | raw authenticated ISAPI call |
+| `--sync-to <ip> [--only emp,emp]` | union sync, optionally restricted to named employees |
+
+Build the tool with `dotnet build`; it targets net8.0, and this server has only .NET 10, so run the
+dev build with `DOTNET_ROLL_FORWARD=LatestMajor` or use a self-contained publish.
+
+## Environment notes
+
+- Service is deployed at `C:\Users\User\Desktop\HikSync\HikSync\` (self-contained) and is registered
+  as `HikSync`, **start it from an elevated shell** — `Start-Service HikSync`. It was found stopped
+  with its install directory missing, which is why nothing had run recently.
+- Deploy updates with `robocopy <src> <dst> /E /XF appsettings.json` so the config is not clobbered.
+- `ConnectionString` must point at the Postgres holding `device_pairs` —
+  `hris_biopack_hanwalla_devices`, not the default `hiksync`.
+- Device passwords live in `device_pairs`: `.219` `Asd@1234`, `.220`/`.221`/`.222` `123456bio`.
+- ISAPI search sessions are keyed on `searchID`: reuse the same value for the same query and it
+  returns an empty continuation. The shipping reader uses the constant `"hiksync"`, one query per
+  employee. Ad-hoc scripts that vary it per call will silently read zero fingerprints.
+- `.220` still carries a leftover test user `999001` (no fingerprint) from an old `--write-test`.

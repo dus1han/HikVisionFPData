@@ -28,9 +28,12 @@ development. See `REQUIREMENTS.md` for the full spec and `DEVELOPMENT_PLAN.md` f
 
 ## Status
 
-- ✅ Builds clean; **17 unit tests pass** (`dotnet test`).
+- ✅ Builds clean; **26 unit tests pass** (`dotnet test`).
 - ✅ **Validated on real hardware over ISAPI:** device login, attendance read, user read/write,
   fingerprint read/write, two-way sync, delete.
+- ✅ **Fingerprint sync confirmed on a live pair** (DS-K1A8503MF-B V1.4.1, 192.168.1.219/.220):
+  a person removed from one terminal is recreated there by the sync with a working `normalFP`
+  template, and repeat runs are a clean no-op (54 users / 54 fingerprints on both sides).
 - ✅ End-to-end runnable against a local Postgres using the **fake device**
   (`Sdk:UseFakeDevice=true`) — no hardware needed to see capture/sync/dedup working.
 - ✅ **Remote-API push implemented** (`HttpAttendancePusher`): POSTs not-yet-uploaded rows to the API
@@ -143,6 +146,17 @@ overwrites `appsettings.json` with the placeholder template — back up your con
   ping-pong) and never deletes. Only users with a fingerprint are synced
   (`Sync:OnlyUsersWithFingerprints`). Set `Bidirectional=false` for the legacy one-way IN→OUT
   master/slave behaviour.
+- **Fingerprint coverage is compared per person, not per finger slot.** The terminal deduplicates
+  biometrically — the same finger enrolled on two devices yields two different templates under
+  unrelated slot numbers, and the device refuses the copy — so a slot-by-slot diff would re-propose a
+  transfer the device declines on every cycle. Duress/alarm fingers (`dismissingFP` and friends) are
+  never copied to the partner, but they do count as coverage: they occupy the slot, and the device
+  will not write a second finger over them.
+- **Fingerprint writes go to `/ISAPI/AccessControl/FingerPrint/SetUp`** (`Sync:FingerprintTransport`,
+  default `isapi`). Not `FingerPrintDownload` — that endpoint exists on DS-K1A8503MF-B V1.4.1 but
+  refuses every well-formed payload. The device answers HTTP 200 either way; the real verdict is
+  `cardReaderRecvStatus` (1 = stored, 5 = that finger is already enrolled, under the employee named in
+  `errorMsg`), and the sync fails the item loudly when it is not 1.
 - **employeeNo IS the card number** — enrollment must set card no = employee no.
 - **Audit log** (`operation_log` table): every device transaction connect→operation→disconnect is
   recorded with device IP, IN/OUT role, operation, status, message and duration. Writes are
